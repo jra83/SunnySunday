@@ -342,6 +342,30 @@ export function burnBuildings(dem, buildings) {
   return zb;
 }
 
+// Masque (Uint8Array) des cellules du MNT situees sous une emprise de
+// batiment -> sert a exclure le bati de la vegetation.
+export function buildingMask(dem, buildings) {
+  const { w, h, lonW, latN, dlon, dlat } = dem;
+  const mask = new Uint8Array(w * h);
+  for (const b of buildings) {
+    let minC = w, maxC = -1, minR = h, maxR = -1;
+    for (const [lon, lat] of b.ring) {
+      const c = (lon - lonW) / dlon, r = (latN - lat) / dlat;
+      if (c < minC) minC = c; if (c > maxC) maxC = c;
+      if (r < minR) minR = r; if (r > maxR) maxR = r;
+    }
+    const c0 = Math.max(0, Math.floor(minC)), c1 = Math.min(w - 1, Math.ceil(maxC));
+    const r0 = Math.max(0, Math.floor(minR)), r1 = Math.min(h - 1, Math.ceil(maxR));
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const lon = lonW + (c + 0.5) * dlon, lat = latN - (r + 0.5) * dlat;
+        if (pointInRing(lon, lat, b.ring)) mask[r * w + c] = 1;
+      }
+    }
+  }
+  return mask;
+}
+
 // Heures de soleil dans la journee compte tenu du masque.
 export function sunHours(lat, lon, year, month, day, horizon) {
   const off = utcOffset(month);

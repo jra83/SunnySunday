@@ -11,7 +11,7 @@ import {
 } from "./ign.js";
 import {
   smoothDem, sampleDem, castShadow, burnBuildings, solarPosition,
-  utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt, pointInRing,
+  utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt, pointInRing, buildingMask,
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
@@ -25,8 +25,10 @@ const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 
 let renderer, scene, camera, controls, sunLight, ambient;
 let dem, demShadow, ortho, lat0, lon0, zmin;
+let demVeg = null, vegAbs = null;         // vegetation : MNT+veg pour l'ombre,
+                                          // altitude absolue de la canopee
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
-let parcelGroup = null, pointMarker = null, sunArcGroup = null;
+let parcelGroup = null, pointMarker = null, sunArcGroup = null, treeGroup = null;
 let onSunCb = null, started = false, farHorizon = null, farGridMat = null;
 let farMeshGeom = null, farDemRef = null;
 
@@ -103,6 +105,23 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
   } catch (e) { /* relief lointain optionnel : on continue sans */ }
   statusCb("Construction de la maquette 3D...");
   demShadow = { ...dem, z: burnBuildings(dem, buildings) };
+  // vegetation : sursol (MNS - sol) > 2,5 m hors emprises de batiments.
+  // vegAbs = altitude absolue de la canopee ; demVeg = MNT+bati+vegetation
+  // pour le calcul de l'ombre portee des arbres.
+  {
+    const bmask = buildingMask(dem, buildings);
+    vegAbs = new Float32Array(dem.z.length);
+    for (let i = 0; i < vegAbs.length; i++) {
+      const s = mns.z[i], g = dem.z[i];
+      if (!bmask[i] && Number.isFinite(s) && Number.isFinite(g)
+          && s - g > 2.5 && s - g < 45) vegAbs[i] = s;
+    }
+    const vz = Float32Array.from(demShadow.z);
+    for (let i = 0; i < vz.length; i++) {
+      if (vegAbs[i] && vegAbs[i] > vz[i]) vz[i] = vegAbs[i];
+    }
+    demVeg = { ...dem, z: vz };
+  }
   buildScene(buildings, parcels, nearCtxDem, farDem);
   updateSun();
   statusCb(`Maquette 3D prête — ${buildings.length} bâtiments pris en compte.`);
@@ -118,6 +137,13 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
     document.getElementById("chkSun").addEventListener("change", e => {
       if (sunArcGroup) sunArcGroup.visible = e.target.checked;
     });
+    document.getElementById("chkTrees").addEventListener("change", e => {
+      if (treeGroup) treeGroup.visible = e.target.checked;
+    });
+    // l'ombre de la vegetation est incrustee dans la texture du sol
+    // -> il faut recalculer l'eclairage
+    document.getElementById("chkTreeShadows").addEventListener("change",
+      updateSun);
     animate();
   }
 }
@@ -144,7 +170,7 @@ function disposeScene() {
     });
     scene = null;
   }
-  parcelGroup = pointMarker = sunArcGroup = farGridMat = null;
+  parcelGroup = pointMarker = sunArcGroup = farGridMat = treeGroup = null;
   farMeshGeom = farDemRef = null;
   sunLight = ambient = null;
 }
@@ -249,6 +275,43 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
     mesh.position.y = (zBase - zmin) - 1.0;
     scene.add(mesh);
   }
+
+  // --- vegetation : canopee LiDAR a l'altitude reelle (toggle chkTrees) ---
+  treeGroup = new THREE.Group();
+  if (vegAbs) {
+    const tmap = new Int32Array(w * h).fill(-1);
+    const tpos = [];
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const k = r * w + c;
+        if (vegAbs[k] > 0) {
+          tmap[k] = tpos.length / 3;
+          tpos.push(c * resM - W / 2, vegAbs[k] - zmin, r * resM - H / 2);
+        }
+      }
+    }
+    const tidx = [];
+    for (let r = 0; r < h - 1; r++) {
+      for (let c = 0; c < w - 1; c++) {
+        const a = tmap[r * w + c], b = tmap[r * w + c + 1];
+        const d2 = tmap[(r + 1) * w + c], e2 = tmap[(r + 1) * w + c + 1];
+        if (a >= 0 && b >= 0 && d2 >= 0 && e2 >= 0) {
+          tidx.push(a, d2, b, b, d2, e2);
+        }
+      }
+    }
+    if (tidx.length) {
+      const tg = new THREE.BufferGeometry();
+      tg.setAttribute("position",
+        new THREE.BufferAttribute(new Float32Array(tpos), 3));
+      tg.setIndex(tidx);
+      tg.computeVertexNormals();
+      treeGroup.add(new THREE.Mesh(tg,
+        new THREE.MeshLambertMaterial({ color: 0x4f7a3c })));
+    }
+  }
+  treeGroup.visible = document.getElementById("chkTrees").checked;
+  scene.add(treeGroup);
 
   // --- parcelles cadastrales (limites drapees au sol) ---
   parcelGroup = new THREE.Group();
@@ -515,6 +578,11 @@ export function updateSun() {
   // de l'ombre, sans flouter l'ombre elle-meme.
   const w = dem.w, h = dem.h, P = ORTHO_PX;
   const sh = castShadow(demShadow, sun.az, Math.max(0.01, el), SHADOW_MAX);
+  // ombre portee de la vegetation : carte d'ombrage incluant la canopee,
+  // calculee seulement si la case "Ombres de la vegetation" est cochee.
+  const treeSh = document.getElementById("chkTreeShadows").checked;
+  const shv = (treeSh && demVeg)
+    ? castShadow(demVeg, sun.az, Math.max(0.01, el), SHADOW_MAX) : null;
   const out = terrainCtx.createImageData(P, P);
   const src = orthoData.data, dst = out.data;
   for (let y = 0; y < P; y++) {
@@ -532,9 +600,23 @@ export function updateSun() {
       const L = Math.min(1, Math.max(0, (s - 0.32) / 0.68));   // 0=ombre 1=soleil
       const f = dayBright * (0.34 + 0.66 * L);                 // contraste constant
       const i = (y * P + x) * 4;
-      dst[i]     = src[i]     * f * tr;
-      dst[i + 1] = src[i + 1] * f * tg;
-      dst[i + 2] = src[i + 2] * f * tb;
+      let R = src[i] * f * tr, G = src[i + 1] * f * tg, B = src[i + 2] * f * tb;
+      if (shv) {
+        const sv = (shv[r0 * w + c0] * (1 - fc) + shv[r0 * w + c0 + 1] * fc)
+            * (1 - fr)
+          + (shv[(r0 + 1) * w + c0] * (1 - fc)
+            + shv[(r0 + 1) * w + c0 + 1] * fc) * fr;
+        const Lv = Math.min(1, Math.max(0, (sv - 0.32) / 0.68));
+        const k = L - Lv;          // > 0 : ombre portee de la vegetation
+        if (k > 0) {               // ombre douce et verdatre (peu contrastee)
+          R *= 1 - 0.38 * k;
+          G *= 1 - 0.24 * k;
+          B *= 1 - 0.42 * k;
+        }
+      }
+      dst[i]     = R;
+      dst[i + 1] = G;
+      dst[i + 2] = B;
       dst[i + 3] = 255;
     }
   }
