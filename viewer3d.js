@@ -14,9 +14,9 @@ import {
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
-// relief lointain : grande grille grossiere, sans texture, autour de la
-// zone detaillee -> donne le contexte (collines / montagnes jusqu'a 25 km).
-const FAR3D_R = 25000, FAR3D_RES = 130;
+// relief lointain : surface grossiere + quadrillage (rendu maille type
+// CAO) autour de la zone detaillee -> contexte collines / montagnes 25 km.
+const FAR3D_R = 25000, FAR3D_RES = 350;
 const SHADOW_MAX = 700;
 const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 
@@ -24,7 +24,7 @@ let renderer, scene, camera, controls, sunLight, ambient;
 let dem, demShadow, ortho, lat0, lon0, zmin;
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
 let parcelGroup = null, pointMarker = null, sunArcGroup = null;
-let onSunCb = null, started = false, farHorizon = null;
+let onSunCb = null, started = false, farHorizon = null, farGridMat = null;
 
 function smoothstep(e0, e1, x) {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -33,24 +33,24 @@ function smoothstep(e0, e1, x) {
 
 export async function start3d(lat, lon, statusCb, onSun, farHor) {
   lat0 = lat; lon0 = lon; onSunCb = onSun; farHorizon = farHor || null;
-  statusCb("Téléchargement du MNT de la zone...");
+  statusCb("Téléchargement du relief précis du terrain (pentes, vallons)...");
   dem = smoothDem(await fetchDem(lat, lon, ZONE_R, ZONE_RES), 2);
-  statusCb("Téléchargement de l'orthophoto HD...");
+  statusCb("Téléchargement de la photo aérienne HD...");
   ortho = await fetchOrthoForDem(dem, ORTHO_PX);
-  statusCb("Téléchargement des bâtiments BD TOPO...");
+  statusCb("Téléchargement des constructions du voisinage...");
   const buildings = await fetchBuildings(lat, lon, ZONE_R + 40);
-  statusCb("Téléchargement des parcelles cadastrales...");
+  statusCb("Téléchargement des limites de parcelles...");
   const parcels = await fetchParcels(lat, lon, ZONE_R + 40);
-  statusCb("Téléchargement du relief lointain...");
+  statusCb("Téléchargement du relief lointain : montagnes à l'horizon...");
   let farDem = null;
   try {
     farDem = smoothDem(await fetchDem(lat, lon, FAR3D_R, FAR3D_RES), 1);
   } catch (e) { /* relief lointain optionnel : on continue sans */ }
-  statusCb("Construction de la scène 3D...");
+  statusCb("Construction de la maquette 3D...");
   demShadow = { ...dem, z: burnBuildings(dem, buildings) };
   buildScene(buildings, parcels, farDem);
   updateSun();
-  statusCb(`Scène 3D prête — ${buildings.length} bâtiments.`);
+  statusCb(`Maquette 3D prête — ${buildings.length} bâtiments pris en compte.`);
   if (!started) {
     started = true;
     window.addEventListener("resize", onResize);
@@ -89,7 +89,7 @@ function disposeScene() {
     });
     scene = null;
   }
-  parcelGroup = pointMarker = sunArcGroup = null;
+  parcelGroup = pointMarker = sunArcGroup = farGridMat = null;
   sunLight = ambient = null;
 }
 
@@ -268,42 +268,80 @@ function buildScene(buildings, parcels, farDem) {
   sunArcGroup.visible = document.getElementById("chkSun").checked;
   scene.add(sunArcGroup);
 
-  // --- relief lointain : grande grille grossiere, sans texture ---
-  // centree comme la grille fine (meme lat0/lon0, meme reference zmin) ;
-  // legerement abaissee pour que la grille fine la recouvre proprement.
-  // Elle est juste eclairee par le soleil -> sa pente donne le relief.
+  // --- relief lointain : surface grossiere + quadrillage (style CAO) ---
+  // une surface pleine ombree, recouverte d'un quadrillage qui epouse le
+  // relief -> lisible, comme l'affichage maille d'une piece en conception
+  // CAO. Les bords de l'emprise de la zone 220 m (x=+-hx, z=+-hz) sont
+  // inseres comme lignes de grille : le trou tombe pile sur des cellules
+  // entieres -> aucune interference avec la grille fine detaillee.
+  farGridMat = null;
   if (farDem) {
-    const fw = farDem.w, fh = farDem.h;
-    const fres = (farDem.latN - farDem.latS) * M_PER_DEG_LAT / fh;
-    const FW = (fw - 1) * fres, FH = (fh - 1) * fres;
-    const fpos = new Float32Array(fw * fh * 3);
-    for (let r = 0; r < fh; r++) {
-      for (let c = 0; c < fw; c++) {
-        const k = r * fw + c;
-        let zz = farDem.z[k];
-        if (!Number.isFinite(zz)) zz = zmin;
-        fpos[3 * k] = c * fres - FW / 2;
-        fpos[3 * k + 1] = zz - zmin;
-        fpos[3 * k + 2] = r * fres - FH / 2;
+    const hx = W / 2, hz = H / 2;            // demi-emprise de la grille fine
+    // axe : pas regulier FAR3D_RES + les 2 lignes du bord de l'emprise
+    const buildAxis = edge => {
+      const set = new Set([Math.round(edge), Math.round(-edge)]);
+      for (let v = -FAR3D_R; v <= FAR3D_R; v += FAR3D_RES) {
+        set.add(Math.round(v));
+      }
+      return [...set].sort((p, q) => p - q);
+    };
+    const xs = buildAxis(hx), zs = buildAxis(hz);
+    const nx = xs.length, nz = zs.length;
+    const pos = new Float32Array(nx * nz * 3);
+    for (let j = 0; j < nz; j++) {
+      for (let i = 0; i < nx; i++) {
+        const x = xs[i], z = zs[j];
+        const zz = sampleDem(farDem,
+          lat0 - z / M_PER_DEG_LAT, lon0 + x / mLon);
+        const k = j * nx + i;
+        pos[3 * k] = x;
+        pos[3 * k + 1] = (Number.isFinite(zz) ? zz : zmin) - zmin;
+        pos[3 * k + 2] = z;
       }
     }
-    const fidx = new Uint32Array((fw - 1) * (fh - 1) * 6);
-    let fn = 0;
-    for (let r = 0; r < fh - 1; r++) {
-      for (let c = 0; c < fw - 1; c++) {
-        const a = r * fw + c, b = a + 1, d2 = a + fw, e2 = d2 + 1;
-        fidx[fn++] = a; fidx[fn++] = d2; fidx[fn++] = b;
-        fidx[fn++] = b; fidx[fn++] = d2; fidx[fn++] = e2;
+    // surface pleine : on saute les cellules entierement dans l'emprise
+    const tri = [];
+    for (let j = 0; j < nz - 1; j++) {
+      for (let i = 0; i < nx - 1; i++) {
+        if (xs[i] >= -hx && xs[i + 1] <= hx
+            && zs[j] >= -hz && zs[j + 1] <= hz) continue;
+        const a = j * nx + i, b = a + 1, d2 = a + nx, e2 = d2 + 1;
+        tri.push(a, d2, b, b, d2, e2);
       }
     }
-    const fgeom = new THREE.BufferGeometry();
-    fgeom.setAttribute("position", new THREE.BufferAttribute(fpos, 3));
-    fgeom.setIndex(new THREE.BufferAttribute(fidx, 1));
-    fgeom.computeVertexNormals();
-    const farMesh = new THREE.Mesh(fgeom,
-      new THREE.MeshLambertMaterial({ color: 0x6f7359 }));
-    farMesh.position.y = -8;     // sous la grille fine -> pas de z-fighting
+    const sgeom = new THREE.BufferGeometry();
+    sgeom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    sgeom.setIndex(tri);
+    sgeom.computeVertexNormals();
+    const farMesh = new THREE.Mesh(sgeom, new THREE.MeshLambertMaterial({
+      color: 0x6b745a, polygonOffset: true,        // recule la surface ->
+      polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));  // quadrillage net
+    farMesh.position.y = -2;
     scene.add(farMesh);
+    // quadrillage par-dessus : lignes qui epousent le relief
+    const seg = [];
+    const put = k => seg.push(pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]);
+    for (let j = 0; j < nz; j++) {            // lignes Est-Ouest
+      for (let i = 0; i < nx - 1; i++) {
+        if (xs[i] >= -hx && xs[i + 1] <= hx
+            && zs[j] > -hz && zs[j] < hz) continue;
+        put(j * nx + i); put(j * nx + i + 1);
+      }
+    }
+    for (let i = 0; i < nx; i++) {            // lignes Nord-Sud
+      for (let j = 0; j < nz - 1; j++) {
+        if (zs[j] >= -hz && zs[j + 1] <= hz
+            && xs[i] > -hx && xs[i] < hx) continue;
+        put(i + j * nx); put(i + (j + 1) * nx);
+      }
+    }
+    const lgeom = new THREE.BufferGeometry();
+    lgeom.setAttribute("position",
+      new THREE.BufferAttribute(new Float32Array(seg), 3));
+    farGridMat = new THREE.LineBasicMaterial({ color: 0xd8dcc8 });
+    const farGrid = new THREE.LineSegments(lgeom, farGridMat);
+    farGrid.position.y = -2;
+    scene.add(farGrid);
   }
 
   // --- lumieres (pour les batiments) ---
@@ -435,6 +473,10 @@ export function updateSun() {
   sunLight.color.setRGB(tr, tg, tb);            // soleil teinte selon l'heure
   sunLight.intensity = SUN_BASE * sunUp;
   ambient.intensity = AMB_BASE * dayBright;
+  if (farGridMat) {                             // quadrillage du relief lointain
+    const gb = 0.4 + 0.6 * dayBright;
+    farGridMat.color.setRGB(0.85 * gb, 0.86 * gb, 0.78 * gb);
+  }
 
   // ciel : bleu le jour -> chaud bas -> sombre la nuit
   const sky = new THREE.Color(0xe6b282).lerp(

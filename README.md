@@ -1,4 +1,4 @@
-# Masque d'ombrage solaire
+# ☀️ Sunny Sunday
 
 Application web d'analyse d'ensoleillement et de masque d'ombrage pour des
 parcelles en France, à partir des données IGN.

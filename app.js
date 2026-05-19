@@ -86,7 +86,11 @@ const setStatus = m => {
 const reveal = id => document.getElementById(id).classList.add("show");
 
 document.getElementById("btnCalc").addEventListener("click", async () => {
-  if (!point) { setStatus("Place d'abord un point sur la carte."); return; }
+  if (!point) {
+    setStatus("Choisis d'abord un lieu : clique sur la carte ou cherche "
+      + "une adresse.");
+    return;
+  }
   const b = document.getElementById("btnCalc");
   b.disabled = true;
   curStep = 0;
@@ -95,13 +99,14 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
   try {
     const t0 = performance.now();
     // --- masque d'ombrage ---
-    setStatus("Téléchargement du MNT proche (RGE ALTI)...");
+    setStatus("Téléchargement du relief proche : collines, vallons, pentes...");
     const near = await fetchDem(point.lat, point.lon, NEAR.radiusM, NEAR.resM);
-    setStatus("Téléchargement du MNT lointain 25 km (patiente)...");
+    setStatus("Téléchargement des montagnes et reliefs lointains "
+      + "jusqu'à 25 km (un peu de patience)...");
     const far = await fetchDem(point.lat, point.lon, FAR.radiusM, FAR.resM);
-    setStatus("Téléchargement des bâtiments BD TOPO...");
+    setStatus("Repérage des bâtiments alentour...");
     const buildings = await fetchBuildings(point.lat, point.lon, BUILD_RADIUS);
-    setStatus("Calcul du masque (relief + bâtiments)...");
+    setStatus("Calcul des ombres du relief et des bâtiments...");
     await new Promise(r => setTimeout(r, 20));
     const { horizon, zGround } = computeHorizon(
       [{ dem: near, ...NEAR }, { dem: far, ...FAR }],
