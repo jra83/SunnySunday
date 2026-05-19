@@ -13,14 +13,7 @@ import {
   utcOffset, M_PER_DEG_LAT, sunTrack,
 } from "./compute.js";
 
-// allege le GPU sur mobile : un GPU de telephone sature avec une shadow
-// map 4096^2. Reduire ORTHO_PX raccourcit aussi la boucle updateSun
-// (ORTHO_PX^2 iterations) -> slider d'heure plus reactif.
-const IS_MOBILE = matchMedia("(pointer: coarse)").matches
-  || window.innerWidth < 760;
-const ZONE_R = 220, ZONE_RES = 2;
-const ORTHO_PX = IS_MOBILE ? 1024 : 2048;
-const SHADOW_SIZE = IS_MOBILE ? 2048 : 4096;
+const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
 const SHADOW_MAX = 700;
 const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 
@@ -73,16 +66,23 @@ function disposeScene() {
   if (controls) { controls.dispose(); controls = null; }
   if (scene) {
     scene.traverse(o => {
+      // les lumieres portent une shadow map (render target GPU volumineux)
+      // que seul dispose() libere -> sinon elle fuit a chaque adresse.
+      if (o.isLight) o.dispose();
       if (o.geometry) o.geometry.dispose();
       const m = o.material;
       if (m) for (const mat of (Array.isArray(m) ? m : [m])) {
-        if (mat.map) mat.map.dispose();
+        // libere toutes les textures du materiau (map, et autres slots)
+        for (const v of Object.values(mat)) {
+          if (v && v.isTexture) v.dispose();
+        }
         mat.dispose();
       }
     });
     scene = null;
   }
   parcelGroup = pointMarker = sunArcGroup = null;
+  sunLight = ambient = null;
 }
 
 function buildScene(buildings, parcels) {
@@ -262,7 +262,7 @@ function buildScene(buildings, parcels) {
   scene.add(ambient);
   sunLight = new THREE.DirectionalLight(0xffffff, SUN_BASE);
   sunLight.castShadow = true;
-  sunLight.shadow.mapSize.set(SHADOW_SIZE, SHADOW_SIZE);  // 2048 mobile
+  sunLight.shadow.mapSize.set(4096, 4096);   // 8192 saturait la memoire GPU
   const d = sceneSize * 0.72;
   const sc = sunLight.shadow.camera;
   sc.left = -d; sc.right = d; sc.top = d; sc.bottom = -d;
@@ -277,10 +277,8 @@ function buildScene(buildings, parcels) {
   // --- rendu + camera ---
   const cw = cont.clientWidth || 820, ch = cont.clientHeight || 460;
   if (!renderer) {
-    renderer = new THREE.WebGLRenderer({ antialias: true,
-      powerPreference: "high-performance" });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio,
-      IS_MOBILE ? 1.5 : 1.75));
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     // sans preventDefault, une perte de contexte WebGL est definitive et
