@@ -9,6 +9,12 @@ const GEOC = "https://data.geopf.fr/geocodage/completion";
 const SEARCH = "https://data.geopf.fr/geocodage/search";
 const MNT_LAYER = "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES";   // RGE ALTI
 
+// modeles numeriques de SURFACE (sursol = toits + vegetation) :
+// LiDAR HD en priorite, repli sur le MNS RGE ALTI (couverture complete).
+export const LAYER_MNS_LIDAR =
+  "IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.WGS84G";
+export const LAYER_MNS_RGE = "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES.MNS";
+
 // --- autocompletion d'adresse ---------------------------------------------
 export async function completeAddress(text) {
   if (text.trim().length < 4) return [];

@@ -7,10 +7,11 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import {
   fetchDem, fetchOrthoForDem, fetchBuildings, fetchParcels,
+  LAYER_MNS_LIDAR, LAYER_MNS_RGE,
 } from "./ign.js";
 import {
   smoothDem, sampleDem, castShadow, burnBuildings, solarPosition,
-  utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt,
+  utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt, pointInRing,
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
@@ -34,6 +35,43 @@ function smoothstep(e0, e1, x) {
   return t * t * (3 - 2 * t);
 }
 
+// le MNS LiDAR HD couvre-t-il la zone ? (pas disponible partout en France)
+// -> sinon on bascule sur le MNS RGE ALTI (couverture complete).
+function demCovered(surf, ground) {
+  let ok = 0;
+  for (let i = 0; i < surf.z.length; i++) {
+    const s = surf.z[i], g = ground.z[i];
+    if (Number.isFinite(s) && Number.isFinite(g) && s >= g - 3) ok++;
+  }
+  return ok / surf.z.length > 0.5;
+}
+
+// hauteur de toit d'un batiment estimee depuis le MNS (sursol au-dessus
+// du sol) : 60e percentile sur l'emprise -> robuste aux bords et antennes.
+function roofHeightFromMNS(mns, mnt, b) {
+  const { lonW, latN, dlon, dlat, w, h } = mns;
+  let minC = w, maxC = -1, minR = h, maxR = -1;
+  for (const [lon, lat] of b.ring) {
+    const c = (lon - lonW) / dlon, r = (latN - lat) / dlat;
+    if (c < minC) minC = c; if (c > maxC) maxC = c;
+    if (r < minR) minR = r; if (r > maxR) maxR = r;
+  }
+  const c0 = Math.max(0, Math.floor(minC)), c1 = Math.min(w - 1, Math.ceil(maxC));
+  const r0 = Math.max(0, Math.floor(minR)), r1 = Math.min(h - 1, Math.ceil(maxR));
+  const hs = [];
+  for (let r = r0; r <= r1; r++) {
+    for (let c = c0; c <= c1; c++) {
+      const lon = lonW + (c + 0.5) * dlon, lat = latN - (r + 0.5) * dlat;
+      if (!pointInRing(lon, lat, b.ring)) continue;
+      const s = mns.z[r * w + c], g = mnt.z[r * w + c];
+      if (Number.isFinite(s) && Number.isFinite(g)) hs.push(s - g);
+    }
+  }
+  if (hs.length < 3) return null;
+  hs.sort((p, q) => p - q);
+  return Math.min(120, Math.max(2.5, hs[Math.floor(hs.length * 0.6)]));
+}
+
 export async function start3d(lat, lon, statusCb, onSun, farHor) {
   lat0 = lat; lon0 = lon; onSunCb = onSun; farHorizon = farHor || null;
   statusCb("Téléchargement du relief précis du terrain (pentes, vallons)...");
@@ -44,6 +82,16 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
   const buildings = await fetchBuildings(lat, lon, ZONE_R + 40);
   statusCb("Téléchargement des limites de parcelles...");
   const parcels = await fetchParcels(lat, lon, ZONE_R + 40);
+  statusCb("Téléchargement du relief de surface LiDAR HD (toits)...");
+  let mns = await fetchDem(lat, lon, ZONE_R, ZONE_RES, LAYER_MNS_LIDAR);
+  if (!demCovered(mns, dem)) {                  // pas de couverture LiDAR HD
+    mns = await fetchDem(lat, lon, ZONE_R, ZONE_RES, LAYER_MNS_RGE);
+  }
+  mns = smoothDem(mns, 1);
+  for (const b of buildings) {                  // toits a la hauteur reelle
+    const hgt = roofHeightFromMNS(mns, dem, b);
+    if (hgt != null) b.height = hgt;
+  }
   statusCb("Téléchargement du relief alentour...");
   let nearCtxDem = null, farDem = null;
   try {

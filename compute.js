@@ -298,7 +298,7 @@ export function castShadow(dem, sunAz, sunEl, maxDist, growth = 220) {
 // BATIMENTS : gravure des emprises dans le MNT (pour les ombres portees)
 // --------------------------------------------------------------------------
 
-function pointInRing(px, py, ring) {
+export function pointInRing(px, py, ring) {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
     const xi = ring[i][0], yi = ring[i][1];
