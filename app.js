@@ -72,13 +72,26 @@ document.addEventListener("click", e => {
 
 // ------------------------------------------------------- calcul (1 bouton)
 const statusEl = document.getElementById("status");
-const setStatus = m => { statusEl.textContent = m; };
+const progressEl = document.getElementById("progress");
+const barEl = document.getElementById("bar");
+// la barre avance d'un cran a chaque message de statut : 4 etapes ici
+// + 6 dans start3d + le message final = ~11 crans.
+const TOTAL_STEPS = 11;
+let curStep = 0;
+const setStatus = m => {
+  statusEl.textContent = m;
+  curStep++;
+  barEl.style.width = Math.min(100, curStep / TOTAL_STEPS * 100) + "%";
+};
 const reveal = id => document.getElementById(id).classList.add("show");
 
 document.getElementById("btnCalc").addEventListener("click", async () => {
   if (!point) { setStatus("Place d'abord un point sur la carte."); return; }
   const b = document.getElementById("btnCalc");
   b.disabled = true;
+  curStep = 0;
+  barEl.style.width = "0%";
+  progressEl.classList.add("show");
   try {
     const t0 = performance.now();
     // --- masque d'ombrage ---
@@ -110,8 +123,11 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
     setStatus(`Ensoleillement calculé en `
       + `${((performance.now() - t0) / 1000).toFixed(1)} s `
       + `(${buildings.length} bâtiments).`);
+    barEl.style.width = "100%";
+    setTimeout(() => progressEl.classList.remove("show"), 1200);
   } catch (e) {
     setStatus("Erreur : " + e.message);
+    progressEl.classList.remove("show");
   }
   b.disabled = false;
 });

@@ -38,7 +38,12 @@
   button.active { background:var(--accent); color:#fff; }
   button:disabled { opacity:.5; cursor:default; }
   .status { color:var(--muted); font-size:13px; min-height:18px;
-            margin:10px 0; }
+            margin:10px 0 4px; }
+  .progress { height:6px; background:#2b2f38; border-radius:4px;
+              overflow:hidden; margin:0 0 12px; display:none; }
+  .progress.show { display:block; }
+  .bar { height:100%; width:0; background:var(--accent);
+         transition:width .3s ease; }
   .panel { display:none; margin-top:18px; }
   .panel.show { display:block; }
   .panel h3 { font-size:15px; margin:0 0 8px; font-weight:600; }
@@ -76,6 +81,7 @@
     <button id="btnCalc">Calcul de l'ensoleillement</button>
   </div>
   <div id="status" class="status"></div>
+  <div id="progress" class="progress"><div id="bar" class="bar"></div></div>
 
   <div id="panelMask" class="panel">
     <h3>Masque d'ombrage</h3>

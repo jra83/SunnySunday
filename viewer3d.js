@@ -202,19 +202,24 @@ function buildScene(buildings, parcels) {
 
   // --- point selectionne sur la carte 2D, reporte en 3D ---
   // la scene est centree sur lat0/lon0 -> le point est a x=0, z=0.
-  const gPt = sampleDem(dem, lat0, lon0);
-  const yPt = Number.isFinite(gPt) ? gPt - zmin : 0;
+  // marqueur discret : depasse de 5 m le volume le plus haut a cet endroit
+  // (demShadow = sol + batiments incrustes) -> toit s'il y a un batiment,
+  // sinon le sol.
+  const gGround = sampleDem(dem, lat0, lon0);
+  const gTop = sampleDem(demShadow, lat0, lon0);
+  const yGround = Number.isFinite(gGround) ? gGround - zmin : 0;
+  const yTop = Number.isFinite(gTop) ? gTop - zmin : yGround;
+  const poleH = Math.max(5, yTop - yGround + 5);
   pointMarker = new THREE.Group();
-  const poleH = sceneSize * 0.07;
   const markMat = new THREE.MeshBasicMaterial({ color: 0xffd23f });
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(
-    sceneSize * 0.004, sceneSize * 0.004, poleH, 8), markMat);
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.3, 0.3, poleH, 8), markMat);
   pole.position.y = poleH / 2;
   const head = new THREE.Mesh(
-    new THREE.SphereGeometry(sceneSize * 0.014, 16, 12), markMat);
+    new THREE.SphereGeometry(1.1, 16, 12), markMat);
   head.position.y = poleH;
   pointMarker.add(pole, head);
-  pointMarker.position.set(0, yPt, 0);
+  pointMarker.position.set(0, yGround, 0);
   pointMarker.visible = document.getElementById("chkPoint").checked;
   scene.add(pointMarker);
 
@@ -241,7 +246,7 @@ function buildScene(buildings, parcels) {
       new THREE.BufferGeometry().setFromPoints(pts),
       new THREE.LineBasicMaterial({ color: t.color })));
   }
-  sunArcGroup.position.y = yPt;
+  sunArcGroup.position.y = yGround;
   sunArcGroup.visible = document.getElementById("chkSun").checked;
   scene.add(sunArcGroup);
 
