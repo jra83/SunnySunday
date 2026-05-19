@@ -224,7 +224,7 @@ export function buildingsHorizon(buildings, lat0, lon0, zObs, dem) {
 
 export function utcOffset(month) { return (month >= 4 && month <= 10) ? 2 : 1; }
 
-function horizonAt(azQuery, horizon) {
+export function horizonAt(azQuery, horizon) {
   const a = ((azQuery % 360) + 360) % 360;
   const i0 = Math.floor(a) % 360;
   const i1 = (i0 + 1) % 360;

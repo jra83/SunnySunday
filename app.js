@@ -75,8 +75,8 @@ const statusEl = document.getElementById("status");
 const progressEl = document.getElementById("progress");
 const barEl = document.getElementById("bar");
 // la barre avance d'un cran a chaque message de statut : 4 etapes ici
-// + 6 dans start3d + le message final = ~11 crans.
-const TOTAL_STEPS = 11;
+// + 7 dans start3d + le message final = ~12 crans.
+const TOTAL_STEPS = 12;
 let curStep = 0;
 const setStatus = m => {
   statusEl.textContent = m;
@@ -108,6 +108,13 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
       point.lat, point.lon, EYE_HEIGHT);
     const bHor = buildingsHorizon(buildings, point.lat, point.lon,
       zGround + EYE_HEIGHT, near);
+    // horizon du relief AU-DELA de la zone 3D detaillee (220 m) : la vue 3D
+    // s'en sert pour assombrir la scene quand le soleil passe derriere un
+    // relief lointain (collines / montagnes jusqu'a 25 km).
+    const { horizon: farHorizon3d } = computeHorizon(
+      [{ dem: near, radiusM: NEAR.radiusM, resM: NEAR.resM, minDistM: 220 },
+       { dem: far,  radiusM: FAR.radiusM,  resM: FAR.resM,  minDistM: 1500 }],
+      point.lat, point.lon, EYE_HEIGHT);
     const total = new Float32Array(360);
     for (let i = 0; i < 360; i++) total[i] = Math.max(horizon[i], bHor[i]);
     lastMask = { terrain: horizon, total, lat: point.lat, lon: point.lon };
@@ -119,7 +126,7 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
     // nulle et la 3D reste grise)
     reveal("panel3d");
     await new Promise(r => requestAnimationFrame(r));
-    await start3d(point.lat, point.lon, setStatus, onSunMoved);
+    await start3d(point.lat, point.lon, setStatus, onSunMoved, farHorizon3d);
     setStatus(`Ensoleillement calculé en `
       + `${((performance.now() - t0) / 1000).toFixed(1)} s `
       + `(${buildings.length} bâtiments).`);

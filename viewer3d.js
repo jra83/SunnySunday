@@ -10,10 +10,13 @@ import {
 } from "./ign.js";
 import {
   smoothDem, sampleDem, castShadow, burnBuildings, solarPosition,
-  utcOffset, M_PER_DEG_LAT, sunTrack,
+  utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt,
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
+// relief lointain : grande grille grossiere, sans texture, autour de la
+// zone detaillee -> donne le contexte (collines / montagnes jusqu'a 25 km).
+const FAR3D_R = 25000, FAR3D_RES = 130;
 const SHADOW_MAX = 700;
 const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 
@@ -21,15 +24,15 @@ let renderer, scene, camera, controls, sunLight, ambient;
 let dem, demShadow, ortho, lat0, lon0, zmin;
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
 let parcelGroup = null, pointMarker = null, sunArcGroup = null;
-let onSunCb = null, started = false;
+let onSunCb = null, started = false, farHorizon = null;
 
 function smoothstep(e0, e1, x) {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
 }
 
-export async function start3d(lat, lon, statusCb, onSun) {
-  lat0 = lat; lon0 = lon; onSunCb = onSun;
+export async function start3d(lat, lon, statusCb, onSun, farHor) {
+  lat0 = lat; lon0 = lon; onSunCb = onSun; farHorizon = farHor || null;
   statusCb("Téléchargement du MNT de la zone...");
   dem = smoothDem(await fetchDem(lat, lon, ZONE_R, ZONE_RES), 2);
   statusCb("Téléchargement de l'orthophoto HD...");
@@ -38,9 +41,14 @@ export async function start3d(lat, lon, statusCb, onSun) {
   const buildings = await fetchBuildings(lat, lon, ZONE_R + 40);
   statusCb("Téléchargement des parcelles cadastrales...");
   const parcels = await fetchParcels(lat, lon, ZONE_R + 40);
+  statusCb("Téléchargement du relief lointain...");
+  let farDem = null;
+  try {
+    farDem = smoothDem(await fetchDem(lat, lon, FAR3D_R, FAR3D_RES), 1);
+  } catch (e) { /* relief lointain optionnel : on continue sans */ }
   statusCb("Construction de la scène 3D...");
   demShadow = { ...dem, z: burnBuildings(dem, buildings) };
-  buildScene(buildings, parcels);
+  buildScene(buildings, parcels, farDem);
   updateSun();
   statusCb(`Scène 3D prête — ${buildings.length} bâtiments.`);
   if (!started) {
@@ -85,7 +93,7 @@ function disposeScene() {
   sunLight = ambient = null;
 }
 
-function buildScene(buildings, parcels) {
+function buildScene(buildings, parcels, farDem) {
   disposeScene();
   const cont = document.getElementById("three");
   cont.innerHTML = "";
@@ -117,6 +125,9 @@ function buildScene(buildings, parcels) {
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color("#9fc6e8");
+  // brume atmospherique : ne touche que le lointain (>9 km), fond la
+  // bordure de la grille lointaine dans le ciel, zone detaillee intacte.
+  scene.fog = new THREE.Fog(0x9fc6e8, 9000, 27000);
 
   // --- terrain : ombre incrustee (contraste constant), non eclaire ---
   const pos = new Float32Array(w * h * 3);
@@ -257,6 +268,44 @@ function buildScene(buildings, parcels) {
   sunArcGroup.visible = document.getElementById("chkSun").checked;
   scene.add(sunArcGroup);
 
+  // --- relief lointain : grande grille grossiere, sans texture ---
+  // centree comme la grille fine (meme lat0/lon0, meme reference zmin) ;
+  // legerement abaissee pour que la grille fine la recouvre proprement.
+  // Elle est juste eclairee par le soleil -> sa pente donne le relief.
+  if (farDem) {
+    const fw = farDem.w, fh = farDem.h;
+    const fres = (farDem.latN - farDem.latS) * M_PER_DEG_LAT / fh;
+    const FW = (fw - 1) * fres, FH = (fh - 1) * fres;
+    const fpos = new Float32Array(fw * fh * 3);
+    for (let r = 0; r < fh; r++) {
+      for (let c = 0; c < fw; c++) {
+        const k = r * fw + c;
+        let zz = farDem.z[k];
+        if (!Number.isFinite(zz)) zz = zmin;
+        fpos[3 * k] = c * fres - FW / 2;
+        fpos[3 * k + 1] = zz - zmin;
+        fpos[3 * k + 2] = r * fres - FH / 2;
+      }
+    }
+    const fidx = new Uint32Array((fw - 1) * (fh - 1) * 6);
+    let fn = 0;
+    for (let r = 0; r < fh - 1; r++) {
+      for (let c = 0; c < fw - 1; c++) {
+        const a = r * fw + c, b = a + 1, d2 = a + fw, e2 = d2 + 1;
+        fidx[fn++] = a; fidx[fn++] = d2; fidx[fn++] = b;
+        fidx[fn++] = b; fidx[fn++] = d2; fidx[fn++] = e2;
+      }
+    }
+    const fgeom = new THREE.BufferGeometry();
+    fgeom.setAttribute("position", new THREE.BufferAttribute(fpos, 3));
+    fgeom.setIndex(new THREE.BufferAttribute(fidx, 1));
+    fgeom.computeVertexNormals();
+    const farMesh = new THREE.Mesh(fgeom,
+      new THREE.MeshLambertMaterial({ color: 0x6f7359 }));
+    farMesh.position.y = -8;     // sous la grille fine -> pas de z-fighting
+    scene.add(farMesh);
+  }
+
   // --- lumieres (pour les batiments) ---
   ambient = new THREE.AmbientLight(0xbcd0e8, AMB_BASE);
   scene.add(ambient);
@@ -288,7 +337,8 @@ function buildScene(buildings, parcels) {
   }
   renderer.setSize(cw, ch);
   cont.appendChild(renderer.domElement);
-  camera = new THREE.PerspectiveCamera(50, cw / ch, 1, 9000);
+  // plan lointain etendu pour englober la grille du relief lointain (25 km)
+  camera = new THREE.PerspectiveCamera(50, cw / ch, 2, 60000);
   camera.position.set(0, H * 0.8, H * 1.0);
   controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 0, 0);
@@ -322,10 +372,16 @@ export function updateSun() {
   const sun = solarPosition(lat0, lon0, utc);
 
   const el = sun.el;
+  // le soleil est-il masque par un relief lointain (au-dela de la zone
+  // detaillee de 220 m, jusqu'a 25 km) ? blockFactor : 1 = masque,
+  // 0 = degage, avec une transition douce de ~1 deg autour de l'horizon.
+  const reliefBlock = farHorizon ? horizonAt(sun.az, farHorizon) : -90;
+  const blockFactor = smoothstep(-0.5, 0.5, reliefBlock - el);
   // luminosite du sol selon l'heure : 1 a midi, plancher 0.34 (la demarcation
   // d'ombre reste donc visible meme la nuit)
   const dayBright = 0.34 + 0.66 * smoothstep(-4, 8, el);
-  const sunUp = smoothstep(-1, 5, el);          // intensite du soleil direct
+  // intensite du soleil direct : annulee si masque par le relief lointain
+  const sunUp = smoothstep(-1, 5, el) * (1 - blockFactor);
   // coloration de la lumiere selon l'heure
   let tr, tg, tb;
   if (el >= 0) {
@@ -351,8 +407,10 @@ export function updateSun() {
       const gx = (x + 0.5) * w / P - 0.5;
       const c0 = Math.max(0, Math.min(w - 2, Math.floor(gx)));
       const fc = Math.min(1, Math.max(0, gx - c0));
-      const s = (sh[r0 * w + c0] * (1 - fc) + sh[r0 * w + c0 + 1] * fc) * (1 - fr)
+      const s0 = (sh[r0 * w + c0] * (1 - fc) + sh[r0 * w + c0 + 1] * fc) * (1 - fr)
         + (sh[(r0 + 1) * w + c0] * (1 - fc) + sh[(r0 + 1) * w + c0 + 1] * fc) * fr;
+      // relief lointain : bascule tout le sol a l'ombre quand il masque
+      const s = s0 + (0.32 - s0) * blockFactor;
       const L = Math.min(1, Math.max(0, (s - 0.32) / 0.68));   // 0=ombre 1=soleil
       const f = dayBright * (0.34 + 0.66 * L);                 // contraste constant
       const i = (y * P + x) * 4;
@@ -382,6 +440,7 @@ export function updateSun() {
   const sky = new THREE.Color(0xe6b282).lerp(
     new THREE.Color(0x9fc6e8), Math.min(1, Math.max(0, el) / 15));
   scene.background.setHex(0x10141c).lerp(sky, dayBright);
+  if (scene.fog) scene.fog.color.copy(scene.background);  // brume = ciel
 
   const hh = Math.floor(mins / 60), mm = mins % 60;
   document.getElementById("v_hour").textContent =
@@ -390,7 +449,8 @@ export function updateSun() {
     String(date.getUTCDate()).padStart(2, "0") + "/" +
     String(date.getUTCMonth() + 1).padStart(2, "0");
   document.getElementById("sun3d").textContent =
-    `Soleil : azimut ${sun.az.toFixed(0)}°, hauteur ${sun.el.toFixed(0)}°`;
+    `Soleil : azimut ${sun.az.toFixed(0)}°, hauteur ${sun.el.toFixed(0)}°`
+    + (blockFactor > 0.5 && el > 0 ? " — masqué par le relief lointain" : "");
   if (onSunCb) onSunCb(sun.az, sun.el);
 }
 
