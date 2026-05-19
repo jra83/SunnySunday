@@ -29,6 +29,8 @@ let dem, demShadow, ortho, lat0, lon0, zmin;
 let demVeg = null, vegAbs = null;         // vegetation : MNT+veg pour l'ombre,
                                           // altitude absolue de la canopee
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
+let bldCanvas, bldCtx, bldTex;            // texture batiments (ortho + ombre
+                                          // vegetale hachuree, recomposee)
 let parcelGroup = null, pointMarker = null, sunArcGroup = null, treeGroup = null;
 let onSunCb = null, started = false, farHorizon = null, farGridMat = null;
 let farMeshGeom = null, farDemRef = null;
@@ -180,13 +182,19 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
   }
   if (!Number.isFinite(zmin)) zmin = 0;
 
-  // orthophoto -> canvas (texture batiments) + ImageData (recomposition sol)
+  // orthophoto -> ImageData (recomposition du sol et des batiments)
   const orthoCanvas = document.createElement("canvas");
   orthoCanvas.width = ORTHO_PX; orthoCanvas.height = ORTHO_PX;
   const oc = orthoCanvas.getContext("2d");
   oc.drawImage(ortho, 0, 0, ORTHO_PX, ORTHO_PX);
   orthoData = oc.getImageData(0, 0, ORTHO_PX, ORTHO_PX);
-  const bldTex = new THREE.CanvasTexture(orthoCanvas);
+  // texture des batiments : recomposee a chaque updateSun (ortho + ombre
+  // vegetale hachuree, projetee en planaire -> les hachures montent les murs)
+  bldCanvas = document.createElement("canvas");
+  bldCanvas.width = 1024; bldCanvas.height = 1024;
+  bldCtx = bldCanvas.getContext("2d");
+  bldCtx.drawImage(orthoCanvas, 0, 0, 1024, 1024);   // ortho nu au depart
+  bldTex = new THREE.CanvasTexture(bldCanvas);
   bldTex.colorSpace = THREE.SRGBColorSpace;
 
   terrainCanvas = document.createElement("canvas");
@@ -600,9 +608,9 @@ export function updateSun() {
             + shv[(r0 + 1) * w + c0 + 1] * fc) * fr;
         const Lv = Math.min(1, Math.max(0, (sv - 0.32) / 0.68));
         const k = L - Lv;          // > 0 : ombre portee de la vegetation
-        // hachures diagonales : ombre aussi marquee que celle d'un
-        // batiment, mais en motif pour la distinguer au coup d'oeil.
-        if (k > 0 && ((x + y) % 16) < 7) {
+        // hachures diagonales fines et serrees : ombre aussi marquee que
+        // celle d'un batiment, mais en motif pour la distinguer.
+        if (k > 0 && ((x + y) % 5) < 3) {
           const dk = 1 - 0.62 * k;
           R *= dk; G *= dk; B *= dk;
         }
@@ -615,6 +623,38 @@ export function updateSun() {
   }
   terrainCtx.putImageData(out, 0, 0);
   terrainTex.needsUpdate = true;
+
+  // --- texture des batiments : ortho + ombre vegetale hachuree ---
+  // projection planaire (UV = position au sol) -> la hachure du sol
+  // "monte" sur les murs verticaux. La hachure n'est PAS appliquee a
+  // l'ombre des batiments eux-memes (geree par le soleil GPU).
+  {
+    const BP = 1024;
+    const bout = bldCtx.createImageData(BP, BP);
+    const bd = bout.data;
+    for (let by = 0; by < BP; by++) {
+      const rr = Math.min(h - 1, (by * h / BP) | 0);
+      for (let bx = 0; bx < BP; bx++) {
+        const cc = Math.min(w - 1, (bx * w / BP) | 0);
+        const oi = ((by << 1) * P + (bx << 1)) * 4;
+        let R = src[oi], G = src[oi + 1], B = src[oi + 2];
+        if (shv) {
+          const gk = rr * w + cc;
+          const Lc = Math.min(1, Math.max(0, (sh[gk] - 0.32) / 0.68));
+          const Lvc = Math.min(1, Math.max(0, (shv[gk] - 0.32) / 0.68));
+          const k = Lc - Lvc;          // > 0 : ombre portee de la vegetation
+          if (k > 0 && ((bx + by) % 5) < 3) {
+            const dk = 1 - 0.62 * k;
+            R *= dk; G *= dk; B *= dk;
+          }
+        }
+        const bi = (by * BP + bx) * 4;
+        bd[bi] = R; bd[bi + 1] = G; bd[bi + 2] = B; bd[bi + 3] = 255;
+      }
+    }
+    bldCtx.putImageData(bout, 0, 0);
+    bldTex.needsUpdate = true;
+  }
 
   // --- batiments : soleil directionnel (ombrage GPU des murs) ---
   if (el > 0) {
