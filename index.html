@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Masque d'ombrage solaire</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<style>
+  :root { --bg:#15171c; --panel:#1e2128; --accent:#4a90d9; --txt:#e6e8ec;
+          --muted:#8b909a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font-family:-apple-system,Segoe UI,Roboto,sans-serif; }
+  .app { max-width:860px; margin:0 auto; padding:22px 18px 40px; }
+  h1 { font-size:22px; margin:0 0 2px; }
+  .sub { color:var(--muted); margin:0 0 16px; font-size:13px; }
+  .search { position:relative; }
+  #addr { width:100%; padding:11px 13px; font-size:15px; border-radius:9px;
+          border:1px solid #333; background:var(--panel); color:var(--txt); }
+  #addr:focus { outline:none; border-color:var(--accent); }
+  #sugg { position:absolute; left:0; right:0; top:46px; z-index:5000;
+          background:var(--panel); border-radius:9px; overflow:hidden;
+          box-shadow:0 8px 24px #0008; }
+  .sugg-item { padding:9px 13px; font-size:13px; cursor:pointer; }
+  .sugg-item:hover { background:#2b2f38; }
+  #map { height:340px; border-radius:11px; margin:12px 0; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  #coord { color:var(--muted); font-size:13px; margin-right:auto; }
+  button { padding:11px 18px; font-size:14px; font-weight:600; border:none;
+           border-radius:9px; background:#2b2f38; color:var(--txt);
+           cursor:pointer; }
+  button.active { background:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .status { color:var(--muted); font-size:13px; min-height:18px;
+            margin:10px 0; }
+  .panel { display:none; margin-top:18px; }
+  .panel.show { display:block; }
+  .panel h3 { font-size:15px; margin:0 0 8px; font-weight:600; }
+  #mask { width:100%; height:auto; background:var(--panel);
+          border-radius:11px; }
+  .hours { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+  .card { background:var(--panel); border-radius:10px; padding:12px 14px;
+          flex:1; min-width:140px; }
+  .card .t { font-size:12px; color:var(--muted); }
+  .card .v { font-size:19px; font-weight:700; margin-top:3px; }
+  .card .v small { font-size:12px; color:var(--muted); font-weight:400; }
+  #three { width:100%; height:460px; background:var(--panel);
+           border-radius:11px; overflow:hidden; }
+  .sliders { margin-top:10px; }
+  .sliders label { display:flex; align-items:center; gap:10px;
+                   font-size:13px; color:var(--muted); margin:6px 0; }
+  .sliders input[type=range] { flex:1; accent-color:var(--accent); }
+  #sun3d { font-size:13px; color:var(--muted); margin-top:4px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Masque d'ombrage solaire</h1>
+  <p class="sub">Calcul 100&nbsp;% dans le navigateur — données IGN.
+     Aucun serveur de calcul.</p>
+
+  <div class="search">
+    <input id="addr" placeholder="Rechercher une adresse..." autocomplete="off">
+    <div id="sugg"></div>
+  </div>
+  <div id="map"></div>
+
+  <div class="row">
+    <span id="coord">Aucun point placé — clique sur la carte</span>
+    <button id="btnCalc">Calcul de l'ensoleillement</button>
+  </div>
+  <div id="status" class="status"></div>
+
+  <div id="panelMask" class="panel">
+    <h3>Masque d'ombrage</h3>
+    <canvas id="mask" width="780" height="400"></canvas>
+    <div id="hours" class="hours"></div>
+  </div>
+
+  <div id="panel3d" class="panel">
+    <h3>Vue 3D — le point jaune « 3D » est reporté sur le masque</h3>
+    <div id="three"></div>
+    <div class="sliders">
+      <label>Heure <input type="range" id="s_hour" min="4" max="22"
+             step="0.0833333" value="13"><span id="v_hour">13h00</span></label>
+      <label>Jour&nbsp; <input type="range" id="s_day" min="1" max="365"
+             step="1" value="172"><span id="v_day">21/06</span></label>
+      <label><input type="checkbox" id="chkParcels"> Limites de parcelles
+             cadastrales</label>
+    </div>
+    <div id="sun3d"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
