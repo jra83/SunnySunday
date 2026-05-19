@@ -10,7 +10,7 @@ import {
 } from "./ign.js";
 import {
   smoothDem, sampleDem, castShadow, burnBuildings, solarPosition,
-  utcOffset, M_PER_DEG_LAT,
+  utcOffset, M_PER_DEG_LAT, sunTrack,
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
@@ -20,7 +20,7 @@ const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 let renderer, scene, camera, controls, sunLight, ambient;
 let dem, demShadow, ortho, lat0, lon0, zmin;
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
-let parcelGroup = null;
+let parcelGroup = null, pointMarker = null, sunArcGroup = null;
 let onSunCb = null, started = false;
 
 function smoothstep(e0, e1, x) {
@@ -49,11 +49,37 @@ export async function start3d(lat, lon, statusCb, onSun) {
     document.getElementById("chkParcels").addEventListener("change", e => {
       if (parcelGroup) parcelGroup.visible = e.target.checked;
     });
+    document.getElementById("chkPoint").addEventListener("change", e => {
+      if (pointMarker) pointMarker.visible = e.target.checked;
+    });
+    document.getElementById("chkSun").addEventListener("change", e => {
+      if (sunArcGroup) sunArcGroup.visible = e.target.checked;
+    });
     animate();
   }
 }
 
+// libere la scene precedente : sans ca, enchainer plusieurs adresses
+// accumule geometries/textures/controls sur le GPU -> contexte WebGL perdu
+// (terrain blanc) + plusieurs OrbitControls actifs sur le meme canvas.
+function disposeScene() {
+  if (controls) { controls.dispose(); controls = null; }
+  if (scene) {
+    scene.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      const m = o.material;
+      if (m) for (const mat of (Array.isArray(m) ? m : [m])) {
+        if (mat.map) mat.map.dispose();
+        mat.dispose();
+      }
+    });
+    scene = null;
+  }
+  parcelGroup = pointMarker = sunArcGroup = null;
+}
+
 function buildScene(buildings, parcels) {
+  disposeScene();
   const cont = document.getElementById("three");
   cont.innerHTML = "";
   const w = dem.w, h = dem.h;
@@ -173,6 +199,51 @@ function buildScene(buildings, parcels) {
   }
   parcelGroup.visible = document.getElementById("chkParcels").checked;
   scene.add(parcelGroup);
+
+  // --- point selectionne sur la carte 2D, reporte en 3D ---
+  // la scene est centree sur lat0/lon0 -> le point est a x=0, z=0.
+  const gPt = sampleDem(dem, lat0, lon0);
+  const yPt = Number.isFinite(gPt) ? gPt - zmin : 0;
+  pointMarker = new THREE.Group();
+  const poleH = sceneSize * 0.07;
+  const markMat = new THREE.MeshBasicMaterial({ color: 0xffd23f });
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(
+    sceneSize * 0.004, sceneSize * 0.004, poleH, 8), markMat);
+  pole.position.y = poleH / 2;
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(sceneSize * 0.014, 16, 12), markMat);
+  head.position.y = poleH;
+  pointMarker.add(pole, head);
+  pointMarker.position.set(0, yPt, 0);
+  pointMarker.visible = document.getElementById("chkPoint").checked;
+  scene.add(pointMarker);
+
+  // --- courses solaires : trajectoires du soleil (dome au-dessus du point) ---
+  sunArcGroup = new THREE.Group();
+  const year = new Date().getFullYear();
+  const arcR = sceneSize * 0.5;
+  const tracks = [
+    { m: 6,  d: 21, color: 0xe8a33d },   // solstice d'ete
+    { m: 3,  d: 20, color: 0x4a90d9 },   // equinoxe
+    { m: 12, d: 21, color: 0xc0504d },   // solstice d'hiver
+  ];
+  for (const t of tracks) {
+    const pts = [];
+    for (const p of sunTrack(lat0, lon0, year, t.m, t.d, 6)) {
+      if (p.el <= 0) continue;
+      const e = p.el * Math.PI / 180, a = p.az * Math.PI / 180;
+      pts.push(new THREE.Vector3(
+        arcR * Math.cos(e) * Math.sin(a),
+        arcR * Math.sin(e),
+        -arcR * Math.cos(e) * Math.cos(a)));
+    }
+    if (pts.length > 1) sunArcGroup.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: t.color })));
+  }
+  sunArcGroup.position.y = yPt;
+  sunArcGroup.visible = document.getElementById("chkSun").checked;
+  scene.add(sunArcGroup);
 
   // --- lumieres (pour les batiments) ---
   ambient = new THREE.AmbientLight(0xbcd0e8, AMB_BASE);
