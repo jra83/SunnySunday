@@ -14,9 +14,9 @@ import {
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
-// relief lointain : surface grossiere + quadrillage (rendu maille type
-// CAO) autour de la zone detaillee -> contexte collines / montagnes 25 km.
-const FAR3D_R = 25000, FAR3D_RES = 350;
+// relief de contexte : une surface a maillage degressif jusqu'a 8 km
+// autour de la zone detaillee. FAR3D_RES = pas du MNT de contexte.
+const FAR3D_R = 8000, FAR3D_RES = 70;
 const SHADOW_MAX = 700;
 const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 
@@ -127,9 +127,9 @@ function buildScene(buildings, parcels, farDem) {
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color("#9fc6e8");
-  // brume atmospherique : ne touche que le lointain (>9 km), fond la
-  // bordure de la grille lointaine dans le ciel, zone detaillee intacte.
-  scene.fog = new THREE.Fog(0x9fc6e8, 9000, 27000);
+  // brume atmospherique : ne touche que le lointain (>4 km), fond la
+  // bordure du relief de contexte dans le ciel, zone detaillee intacte.
+  scene.fog = new THREE.Fog(0x9fc6e8, 4000, 9000);
 
   // --- terrain : ombre incrustee (contraste constant), non eclaire ---
   const pos = new Float32Array(w * h * 3);
@@ -270,21 +270,24 @@ function buildScene(buildings, parcels, farDem) {
   sunArcGroup.visible = document.getElementById("chkSun").checked;
   scene.add(sunArcGroup);
 
-  // --- relief lointain : surface grossiere + quadrillage (style CAO) ---
-  // une surface pleine ombree, recouverte d'un quadrillage qui epouse le
-  // relief -> lisible, comme l'affichage maille d'une piece en conception
-  // CAO. Les bords de l'emprise de la zone 220 m (x=+-hx, z=+-hz) sont
-  // inseres comme lignes de grille : le trou tombe pile sur des cellules
-  // entieres -> aucune interference avec la grille fine detaillee.
+  // --- relief de contexte : une seule surface a maillage degressif ---
+  // UNE surface continue (donc sans raccord interne) de la zone detaillee
+  // jusqu'a 8 km, au maillage de plus en plus grossier vers l'exterieur.
+  // Rendu maille type CAO : surface ombree + quadrillage par-dessus.
+  // Le trou est decoupe pile a l'emprise de la zone 220 m, et son bord
+  // echantillonne le MEME MNT fin que la grille detaillee -> jonction
+  // propre (ecart sous le metre).
   farGridMat = null;
   if (farDem) {
     const hx = W / 2, hz = H / 2;            // demi-emprise de la grille fine
-    // axe : pas regulier FAR3D_RES + les 2 lignes du bord de l'emprise
+    // axe a maillage degressif : pas ~8 m pres du centre -> ~230 m a 8 km
+    // (+ les 2 lignes du bord de l'emprise -> trou exact).
     const buildAxis = edge => {
-      const set = new Set([Math.round(edge), Math.round(-edge)]);
-      for (let v = -FAR3D_R; v <= FAR3D_R; v += FAR3D_RES) {
-        set.add(Math.round(v));
+      const set = new Set([Math.round(edge), Math.round(-edge), 0]);
+      for (let v = 0; v < FAR3D_R; v += 8 + 0.028 * v) {
+        set.add(Math.round(v)); set.add(-Math.round(v));
       }
+      set.add(FAR3D_R); set.add(-FAR3D_R);
       return [...set].sort((p, q) => p - q);
     };
     const xs = buildAxis(hx), zs = buildAxis(hz);
@@ -293,8 +296,11 @@ function buildScene(buildings, parcels, farDem) {
     for (let j = 0; j < nz; j++) {
       for (let i = 0; i < nx; i++) {
         const x = xs[i], z = zs[j];
-        const zz = sampleDem(farDem,
-          lat0 - z / M_PER_DEG_LAT, lon0 + x / mLon);
+        const la = lat0 - z / M_PER_DEG_LAT, lo = lon0 + x / mLon;
+        // MNT fin de la zone si couvert (-> jonction propre au bord du
+        // trou), sinon MNT de contexte 8 km.
+        let zz = sampleDem(dem, la, lo);
+        if (!Number.isFinite(zz)) zz = sampleDem(farDem, la, lo);
         const k = j * nx + i;
         pos[3 * k] = x;
         pos[3 * k + 1] = (Number.isFinite(zz) ? zz : zmin) - zmin;
@@ -321,7 +327,7 @@ function buildScene(buildings, parcels, farDem) {
     const farMesh = new THREE.Mesh(sgeom, new THREE.MeshLambertMaterial({
       color: 0x6b745a, vertexColors: true, polygonOffset: true,
       polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));   // quadrillage net
-    farMesh.position.y = -2;
+    farMesh.position.y = -1;      // tres legerement sous la grille fine
     scene.add(farMesh);
     farMeshGeom = sgeom;          // pour l'ombre portee recalculee a chaque
     farDemRef = farDem;           // mouvement du soleil
@@ -348,7 +354,7 @@ function buildScene(buildings, parcels, farDem) {
       new THREE.BufferAttribute(new Float32Array(seg), 3));
     farGridMat = new THREE.LineBasicMaterial({ color: 0xd8dcc8 });
     const farGrid = new THREE.LineSegments(lgeom, farGridMat);
-    farGrid.position.y = -2;
+    farGrid.position.y = -1;
     scene.add(farGrid);
   }
 
@@ -383,8 +389,8 @@ function buildScene(buildings, parcels, farDem) {
   }
   renderer.setSize(cw, ch);
   cont.appendChild(renderer.domElement);
-  // plan lointain etendu pour englober la grille du relief lointain (25 km)
-  camera = new THREE.PerspectiveCamera(50, cw / ch, 2, 60000);
+  // plan lointain etendu pour englober le relief de contexte (8 km)
+  camera = new THREE.PerspectiveCamera(50, cw / ch, 2, 20000);
   camera.position.set(0, H * 0.8, H * 1.0);
   controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 0, 0);
@@ -486,12 +492,12 @@ export function updateSun() {
     farGridMat.color.setRGB(0.85 * gb, 0.86 * gb, 0.78 * gb);
   }
 
-  // --- relief lointain : ombre portee (cretes -> vallees) ---
-  // marche d'ombrage sur le MNT lointain, jusqu'a 20 km, avec un pas plus
-  // regulier (growth eleve) ; le resultat teinte les sommets de la surface.
+  // --- relief de contexte : ombre portee (cretes -> vallees) ---
+  // marche d'ombrage sur le MNT de contexte (8 km), pas assez regulier
+  // (growth eleve) ; le resultat teinte les sommets de la surface.
   if (farMeshGeom && farDemRef) {
     const mLon = M_PER_DEG_LAT * Math.cos(lat0 * Math.PI / 180);
-    const shf = castShadow(farDemRef, sun.az, Math.max(0.01, el), 20000, 1500);
+    const shf = castShadow(farDemRef, sun.az, Math.max(0.01, el), 8000, 1000);
     const shDem = { ...farDemRef, z: shf };
     const fp = farMeshGeom.attributes.position;
     const fcol = farMeshGeom.attributes.color;
