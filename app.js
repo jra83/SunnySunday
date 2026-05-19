@@ -75,8 +75,8 @@ const statusEl = document.getElementById("status");
 const progressEl = document.getElementById("progress");
 const barEl = document.getElementById("bar");
 // la barre avance d'un cran a chaque message de statut : 4 etapes ici
-// + 7 dans start3d + le message final = ~12 crans.
-const TOTAL_STEPS = 12;
+// + 8 dans start3d + le message final = ~13 crans.
+const TOTAL_STEPS = 13;
 let curStep = 0;
 const setStatus = m => {
   statusEl.textContent = m;

@@ -15,7 +15,9 @@ import {
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
 // relief de contexte : une surface a maillage degressif jusqu'a 8 km
-// autour de la zone detaillee. FAR3D_RES = pas du MNT de contexte.
+// autour de la zone detaillee. NEARCTX = MNT fin de transition (proche,
+// pour une jonction propre), FAR3D = MNT grossier (lointain).
+const NEARCTX_R = 900, NEARCTX_RES = 6;
 const FAR3D_R = 8000, FAR3D_RES = 70;
 const SHADOW_MAX = 700;
 const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
@@ -42,14 +44,18 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
   const buildings = await fetchBuildings(lat, lon, ZONE_R + 40);
   statusCb("Téléchargement des limites de parcelles...");
   const parcels = await fetchParcels(lat, lon, ZONE_R + 40);
+  statusCb("Téléchargement du relief alentour...");
+  let nearCtxDem = null, farDem = null;
+  try {
+    nearCtxDem = smoothDem(await fetchDem(lat, lon, NEARCTX_R, NEARCTX_RES), 1);
+  } catch (e) { /* relief de transition optionnel */ }
   statusCb("Téléchargement du relief lointain : montagnes à l'horizon...");
-  let farDem = null;
   try {
     farDem = smoothDem(await fetchDem(lat, lon, FAR3D_R, FAR3D_RES), 1);
   } catch (e) { /* relief lointain optionnel : on continue sans */ }
   statusCb("Construction de la maquette 3D...");
   demShadow = { ...dem, z: burnBuildings(dem, buildings) };
-  buildScene(buildings, parcels, farDem);
+  buildScene(buildings, parcels, nearCtxDem, farDem);
   updateSun();
   statusCb(`Maquette 3D prête — ${buildings.length} bâtiments pris en compte.`);
   if (!started) {
@@ -95,7 +101,7 @@ function disposeScene() {
   sunLight = ambient = null;
 }
 
-function buildScene(buildings, parcels, farDem) {
+function buildScene(buildings, parcels, nearCtxDem, farDem) {
   disposeScene();
   const cont = document.getElementById("three");
   cont.innerHTML = "";
@@ -280,31 +286,37 @@ function buildScene(buildings, parcels, farDem) {
   farGridMat = null;
   if (farDem) {
     const hx = W / 2, hz = H / 2;            // demi-emprise de la grille fine
-    // axe a maillage degressif : pas ~8 m pres du centre -> ~230 m a 8 km
-    // (+ les 2 lignes du bord de l'emprise -> trou exact).
+    // axe a maillage degressif : pas serre (8 m) jusqu'a 500 m pour une
+    // jonction propre, puis qui s'elargit vite -> ~680 m a 8 km. (+ les
+    // 2 lignes du bord de l'emprise -> trou exact.)
     const buildAxis = edge => {
       const set = new Set([Math.round(edge), Math.round(-edge), 0]);
-      for (let v = 0; v < FAR3D_R; v += 8 + 0.028 * v) {
+      let v = 0;
+      while (v < FAR3D_R) {
         set.add(Math.round(v)); set.add(-Math.round(v));
+        v += v < 500 ? 8 : 8 + 0.09 * (v - 500);
       }
       set.add(FAR3D_R); set.add(-FAR3D_R);
       return [...set].sort((p, q) => p - q);
     };
     const xs = buildAxis(hx), zs = buildAxis(hz);
     const nx = xs.length, nz = zs.length;
+    // altitude : MNT fin de la zone si couvert (jonction propre au bord du
+    // trou), sinon MNT fin de transition (< 900 m), sinon MNT lointain.
+    const elevAt = (x, z) => {
+      const la = lat0 - z / M_PER_DEG_LAT, lo = lon0 + x / mLon;
+      let zz = sampleDem(dem, la, lo);
+      if (!Number.isFinite(zz) && nearCtxDem) zz = sampleDem(nearCtxDem, la, lo);
+      if (!Number.isFinite(zz)) zz = sampleDem(farDem, la, lo);
+      return (Number.isFinite(zz) ? zz : zmin) - zmin;
+    };
     const pos = new Float32Array(nx * nz * 3);
     for (let j = 0; j < nz; j++) {
       for (let i = 0; i < nx; i++) {
-        const x = xs[i], z = zs[j];
-        const la = lat0 - z / M_PER_DEG_LAT, lo = lon0 + x / mLon;
-        // MNT fin de la zone si couvert (-> jonction propre au bord du
-        // trou), sinon MNT de contexte 8 km.
-        let zz = sampleDem(dem, la, lo);
-        if (!Number.isFinite(zz)) zz = sampleDem(farDem, la, lo);
         const k = j * nx + i;
-        pos[3 * k] = x;
-        pos[3 * k + 1] = (Number.isFinite(zz) ? zz : zmin) - zmin;
-        pos[3 * k + 2] = z;
+        pos[3 * k] = xs[i];
+        pos[3 * k + 1] = elevAt(xs[i], zs[j]);
+        pos[3 * k + 2] = zs[j];
       }
     }
     // surface pleine : on saute les cellules entierement dans l'emprise
@@ -332,10 +344,14 @@ function buildScene(buildings, parcels, farDem) {
     farMeshGeom = sgeom;          // pour l'ombre portee recalculee a chaque
     farDemRef = farDem;           // mouvement du soleil
 
-    // quadrillage par-dessus : lignes qui epousent le relief
+    // quadrillage par-dessus : volontairement plus large que le maillage
+    // (1 ligne sur WIRE) + le contour de l'emprise ; lignes transparentes
+    // -> simple repere de relief, discret.
     const seg = [];
     const put = k => seg.push(pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]);
+    const WIRE = 5;
     for (let j = 0; j < nz; j++) {            // lignes Est-Ouest
+      if (j % WIRE !== 0 && Math.abs(zs[j]) !== hz) continue;
       for (let i = 0; i < nx - 1; i++) {
         if (xs[i] >= -hx && xs[i + 1] <= hx
             && zs[j] > -hz && zs[j] < hz) continue;
@@ -343,6 +359,7 @@ function buildScene(buildings, parcels, farDem) {
       }
     }
     for (let i = 0; i < nx; i++) {            // lignes Nord-Sud
+      if (i % WIRE !== 0 && Math.abs(xs[i]) !== hx) continue;
       for (let j = 0; j < nz - 1; j++) {
         if (zs[j] >= -hz && zs[j + 1] <= hz
             && xs[i] > -hx && xs[i] < hx) continue;
@@ -352,7 +369,8 @@ function buildScene(buildings, parcels, farDem) {
     const lgeom = new THREE.BufferGeometry();
     lgeom.setAttribute("position",
       new THREE.BufferAttribute(new Float32Array(seg), 3));
-    farGridMat = new THREE.LineBasicMaterial({ color: 0xd8dcc8 });
+    farGridMat = new THREE.LineBasicMaterial({
+      color: 0xd8dcc8, transparent: true, opacity: 0.35 });
     const farGrid = new THREE.LineSegments(lgeom, farGridMat);
     farGrid.position.y = -1;
     scene.add(farGrid);
