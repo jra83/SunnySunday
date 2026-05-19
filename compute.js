@@ -366,6 +366,17 @@ export function buildingMask(dem, buildings) {
   return mask;
 }
 
+// Le MNS couvre-t-il la zone ? (le LiDAR HD n'est pas disponible partout)
+// surf / ground : objets makeDem de meme grille. -> sinon repli RGE ALTI.
+export function demCovered(surf, ground) {
+  let ok = 0;
+  for (let i = 0; i < surf.z.length; i++) {
+    const s = surf.z[i], g = ground.z[i];
+    if (Number.isFinite(s) && Number.isFinite(g) && s >= g - 3) ok++;
+  }
+  return ok / surf.z.length > 0.5;
+}
+
 // Heures de soleil dans la journee compte tenu du masque.
 export function sunHours(lat, lon, year, month, day, horizon) {
   const off = utcOffset(month);

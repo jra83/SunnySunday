@@ -12,6 +12,7 @@ import {
 import {
   smoothDem, sampleDem, castShadow, burnBuildings, solarPosition,
   utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt, pointInRing, buildingMask,
+  demCovered,
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
@@ -35,17 +36,6 @@ let farMeshGeom = null, farDemRef = null;
 function smoothstep(e0, e1, x) {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
-}
-
-// le MNS LiDAR HD couvre-t-il la zone ? (pas disponible partout en France)
-// -> sinon on bascule sur le MNS RGE ALTI (couverture complete).
-function demCovered(surf, ground) {
-  let ok = 0;
-  for (let i = 0; i < surf.z.length; i++) {
-    const s = surf.z[i], g = ground.z[i];
-    if (Number.isFinite(s) && Number.isFinite(g) && s >= g - 3) ok++;
-  }
-  return ok / surf.z.length > 0.5;
 }
 
 // hauteur de toit d'un batiment estimee depuis le MNS (sursol au-dessus
@@ -276,17 +266,19 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
     scene.add(mesh);
   }
 
-  // --- vegetation : canopee LiDAR a l'altitude reelle (toggle chkTrees) ---
+  // --- vegetation : canopee LiDAR a l'altitude reelle, texturee a
+  // l'orthophoto comme les batiments (projection planaire). Toggle chkTrees.
   treeGroup = new THREE.Group();
   if (vegAbs) {
     const tmap = new Int32Array(w * h).fill(-1);
-    const tpos = [];
+    const tpos = [], tuv = [];
     for (let r = 0; r < h; r++) {
       for (let c = 0; c < w; c++) {
         const k = r * w + c;
         if (vegAbs[k] > 0) {
           tmap[k] = tpos.length / 3;
           tpos.push(c * resM - W / 2, vegAbs[k] - zmin, r * resM - H / 2);
+          tuv.push(c / (w - 1), 1 - r / (h - 1));
         }
       }
     }
@@ -304,10 +296,10 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
       const tg = new THREE.BufferGeometry();
       tg.setAttribute("position",
         new THREE.BufferAttribute(new Float32Array(tpos), 3));
+      tg.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(tuv), 2));
       tg.setIndex(tidx);
       tg.computeVertexNormals();
-      treeGroup.add(new THREE.Mesh(tg,
-        new THREE.MeshLambertMaterial({ color: 0x4f7a3c })));
+      treeGroup.add(new THREE.Mesh(tg, bldMat));   // ortho, comme les batiments
     }
   }
   treeGroup.visible = document.getElementById("chkTrees").checked;
@@ -608,10 +600,11 @@ export function updateSun() {
             + shv[(r0 + 1) * w + c0 + 1] * fc) * fr;
         const Lv = Math.min(1, Math.max(0, (sv - 0.32) / 0.68));
         const k = L - Lv;          // > 0 : ombre portee de la vegetation
-        if (k > 0) {               // ombre douce et verdatre (peu contrastee)
-          R *= 1 - 0.38 * k;
-          G *= 1 - 0.24 * k;
-          B *= 1 - 0.42 * k;
+        // hachures diagonales : ombre aussi marquee que celle d'un
+        // batiment, mais en motif pour la distinguer au coup d'oeil.
+        if (k > 0 && ((x + y) % 16) < 7) {
+          const dk = 1 - 0.62 * k;
+          R *= dk; G *= dk; B *= dk;
         }
       }
       dst[i]     = R;

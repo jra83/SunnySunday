@@ -1,8 +1,9 @@
 // app.js — interface : carte, recherche, et calcul de l'ensoleillement
 // (masque + vue 3D affiches ensemble et lies) en un seul bouton.
-import { completeAddress, fetchDem, fetchBuildings } from "./ign.js";
-import { computeHorizon, buildingsHorizon, sunTrack, sunHours }
-  from "./compute.js";
+import { completeAddress, fetchDem, fetchBuildings, LAYER_MNS_LIDAR,
+  LAYER_MNS_RGE } from "./ign.js";
+import { computeHorizon, horizonFromDem, buildingsHorizon, sunTrack,
+  sunHours, demCovered } from "./compute.js";
 import { start3d, updateSun } from "./viewer3d.js";
 
 const NEAR = { radiusM: 1500, resM: 3, minDistM: 20 };
@@ -74,9 +75,9 @@ document.addEventListener("click", e => {
 const statusEl = document.getElementById("status");
 const progressEl = document.getElementById("progress");
 const barEl = document.getElementById("bar");
-// la barre avance d'un cran a chaque message de statut : 4 etapes ici
-// + 9 dans start3d + le message final = ~14 crans.
-const TOTAL_STEPS = 14;
+// la barre avance d'un cran a chaque message de statut : 5 etapes ici
+// + 9 dans start3d + le message final = ~15 crans.
+const TOTAL_STEPS = 15;
 let curStep = 0;
 const setStatus = m => {
   statusEl.textContent = m;
@@ -106,6 +107,13 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
     const far = await fetchDem(point.lat, point.lon, FAR.radiusM, FAR.resM);
     setStatus("Repérage des bâtiments alentour...");
     const buildings = await fetchBuildings(point.lat, point.lon, BUILD_RADIUS);
+    setStatus("Téléchargement du sursol (végétation, LiDAR HD)...");
+    let mnsNear = await fetchDem(point.lat, point.lon,
+      NEAR.radiusM, NEAR.resM, LAYER_MNS_LIDAR);
+    if (!demCovered(mnsNear, near)) {                // repli MNS RGE ALTI
+      mnsNear = await fetchDem(point.lat, point.lon,
+        NEAR.radiusM, NEAR.resM, LAYER_MNS_RGE);
+    }
     setStatus("Calcul des ombres du relief et des bâtiments...");
     await new Promise(r => setTimeout(r, 20));
     const { horizon, zGround } = computeHorizon(
@@ -122,8 +130,15 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
       point.lat, point.lon, EYE_HEIGHT);
     const total = new Float32Array(360);
     for (let i = 0; i < 360; i++) total[i] = Math.max(horizon[i], bHor[i]);
-    lastMask = { terrain: horizon, total, lat: point.lat, lon: point.lon };
-    drawMask(horizon, total, point.lat, point.lon, cur3dSun);
+    // horizon du sursol / végétation depuis le MNS proche (relief + bâti +
+    // arbres) -> la part au-delà de `total` est la végétation.
+    const mnsH = horizonFromDem(mnsNear, point.lat, point.lon,
+      zGround + EYE_HEIGHT, NEAR.radiusM, NEAR.resM, NEAR.minDistM);
+    const veg = new Float32Array(360);
+    for (let i = 0; i < 360; i++) veg[i] = Math.max(total[i], mnsH[i]);
+    lastMask = { terrain: horizon, total, veg,
+      lat: point.lat, lon: point.lon };
+    drawMask(horizon, total, veg, point.lat, point.lon, cur3dSun);
     showHours(point.lat, point.lon, total, zGround);
     reveal("panelMask");
 
@@ -147,8 +162,8 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
 function onSunMoved(az, el) {
   cur3dSun = { az, el };
   if (lastMask) {
-    drawMask(lastMask.terrain, lastMask.total, lastMask.lat, lastMask.lon,
-      cur3dSun);
+    drawMask(lastMask.terrain, lastMask.total, lastMask.veg,
+      lastMask.lat, lastMask.lon, cur3dSun);
   }
 }
 
@@ -156,7 +171,7 @@ document.getElementById("s_hour").addEventListener("input", updateSun);
 document.getElementById("s_day").addEventListener("input", updateSun);
 
 // --------------------------------------------------------- dessin du masque
-function drawMask(terr, total, lat, lon, curSun) {
+function drawMask(terr, total, veg, lat, lon, curSun) {
   const cv = document.getElementById("mask");
   const ctx = cv.getContext("2d");
   const W = cv.width, H = cv.height;
@@ -192,6 +207,7 @@ function drawMask(terr, total, lat, lon, curSun) {
     ctx.fillStyle = color;
     ctx.fill();
   };
+  fillPoly(veg, "rgba(86,138,64,0.9)");
   fillPoly(total, "rgba(95,112,142,0.92)");
   fillPoly(terr, "rgba(150,150,160,0.9)");
 
@@ -226,11 +242,14 @@ function drawMask(terr, total, lat, lon, curSun) {
 
   ctx.font = "11px sans-serif";
   ctx.fillStyle = "rgba(150,150,160,0.9)";
-  ctx.fillRect(W - 190, 16, 12, 12);
-  ctx.fillStyle = "#8b909a"; ctx.fillText("relief", W - 174, 26);
+  ctx.fillRect(W - 258, 16, 12, 12);
+  ctx.fillStyle = "#8b909a"; ctx.fillText("relief", W - 242, 26);
   ctx.fillStyle = "rgba(95,112,142,0.92)";
-  ctx.fillRect(W - 130, 16, 12, 12);
-  ctx.fillStyle = "#8b909a"; ctx.fillText("bâtiments", W - 114, 26);
+  ctx.fillRect(W - 200, 16, 12, 12);
+  ctx.fillStyle = "#8b909a"; ctx.fillText("bâtiments", W - 184, 26);
+  ctx.fillStyle = "rgba(86,138,64,0.9)";
+  ctx.fillRect(W - 112, 16, 12, 12);
+  ctx.fillStyle = "#8b909a"; ctx.fillText("végétation", W - 96, 26);
 }
 
 // --------------------------------------------------------- cartes "heures"
