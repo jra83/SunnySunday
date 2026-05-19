@@ -10,9 +10,9 @@ import {
   LAYER_MNS_LIDAR, LAYER_MNS_RGE,
 } from "./ign.js";
 import {
-  smoothDem, sampleDem, castShadow, burnBuildings, solarPosition,
-  utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt, pointInRing, buildingMask,
-  demCovered,
+  smoothDem, sampleDem, castShadow, castShadowCanopy, burnBuildings,
+  solarPosition, utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt, pointInRing,
+  buildingMask, demCovered,
 } from "./compute.js";
 
 const ZONE_R = 220, ZONE_RES = 2, ORTHO_PX = 2048;
@@ -26,8 +26,7 @@ const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 
 let renderer, scene, camera, controls, sunLight, ambient;
 let dem, demShadow, ortho, lat0, lon0, zmin;
-let demVeg = null, vegAbs = null;         // vegetation : MNT+veg pour l'ombre,
-                                          // altitude absolue de la canopee
+let vegAbs = null;                        // altitude absolue de la canopee
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
 let bldCanvas, bldCtx, bldTex;            // texture batiments (ortho + ombre
                                           // vegetale hachuree, recomposee)
@@ -97,9 +96,8 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
   } catch (e) { /* relief lointain optionnel : on continue sans */ }
   statusCb("Construction de la maquette 3D...");
   demShadow = { ...dem, z: burnBuildings(dem, buildings) };
-  // vegetation : sursol (MNS - sol) > 2,5 m hors emprises de batiments.
-  // vegAbs = altitude absolue de la canopee ; demVeg = MNT+bati+vegetation
-  // pour le calcul de l'ombre portee des arbres.
+  // vegetation : sursol (MNS - sol) entre 2,5 et 45 m, hors emprises de
+  // batiments. vegAbs = altitude absolue du sommet de la canopee.
   {
     const bmask = buildingMask(dem, buildings);
     vegAbs = new Float32Array(dem.z.length);
@@ -108,11 +106,6 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
       if (!bmask[i] && Number.isFinite(s) && Number.isFinite(g)
           && s - g > 2.5 && s - g < 45) vegAbs[i] = s;
     }
-    const vz = Float32Array.from(demShadow.z);
-    for (let i = 0; i < vz.length; i++) {
-      if (vegAbs[i] && vegAbs[i] > vz[i]) vz[i] = vegAbs[i];
-    }
-    demVeg = { ...dem, z: vz };
   }
   buildScene(buildings, parcels, nearCtxDem, farDem);
   updateSun();
@@ -581,8 +574,11 @@ export function updateSun() {
   // ombre portee de la vegetation : carte d'ombrage incluant la canopee,
   // calculee seulement si la case "Ombres de la vegetation" est cochee.
   const treeSh = document.getElementById("chkTreeShadows").checked;
-  const shv = (treeSh && demVeg)
-    ? castShadow(demVeg, sun.az, Math.max(0.01, el), SHADOW_MAX) : null;
+  // houppier = dalle opaque [~30 % .. sommet], vide dessous (le tronc)
+  const shv = (treeSh && vegAbs)
+    ? castShadowCanopy(dem, vegAbs, 0.30, sun.az, Math.max(0.01, el),
+        SHADOW_MAX)
+    : null;
   const out = terrainCtx.createImageData(P, P);
   const src = orthoData.data, dst = out.data;
   for (let y = 0; y < P; y++) {

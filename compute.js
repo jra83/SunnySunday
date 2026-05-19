@@ -294,6 +294,46 @@ export function castShadow(dem, sunAz, sunEl, maxDist, growth = 220) {
   return out;
 }
 
+// Ombre portee de la VEGETATION : le houppier est traite comme une dalle
+// opaque flottante [base de couronne .. sommet], avec du VIDE dessous (le
+// tronc). Un point de sol est a l'ombre si le rayon vers le soleil traverse
+// cette dalle -> ombre decalee selon le soleil, tronc eclaire soleil bas,
+// flaque d'ombre sous l'arbre a midi.
+// mnt : MNT (sol). vegAbs : altitude absolue du sommet de canopee (0 = rien).
+// crownFrac : hauteur de la base de couronne, en fraction de la hauteur.
+export function castShadowCanopy(mnt, vegAbs, crownFrac, sunAz, sunEl, maxDist) {
+  const { z, w, h } = mnt;
+  const resM = (mnt.latN - mnt.latS) * M_PER_DEG_LAT / h;
+  const out = new Float32Array(w * h).fill(1.0);
+  if (sunEl <= 0) { out.fill(SHADOW_KEEP); return out; }
+  const a = sunAz * DEG, tanEl = Math.tan(sunEl * DEG);
+  const drow = -Math.cos(a) / resM, dcol = Math.sin(a) / resM;
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      const base = z[r * w + c];
+      if (Number.isNaN(base)) continue;
+      let d = resM;
+      while (d <= maxDist) {
+        const ri = Math.round(r + drow * d), ci = Math.round(c + dcol * d);
+        if (ri >= 0 && ri < h && ci >= 0 && ci < w) {
+          const j = ri * w + ci, vTop = vegAbs[j];
+          if (vTop > 0) {
+            const g = z[j];
+            const crownBase = g + crownFrac * (vTop - g);
+            const rayH = base + d * tanEl;
+            if (rayH >= crownBase && rayH <= vTop) {
+              out[r * w + c] = SHADOW_KEEP;
+              break;
+            }
+          }
+        }
+        d += resM * (1.0 + d / 220.0);
+      }
+    }
+  }
+  return out;
+}
+
 // --------------------------------------------------------------------------
 // BATIMENTS : gravure des emprises dans le MNT (pour les ombres portees)
 // --------------------------------------------------------------------------
