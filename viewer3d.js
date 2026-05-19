@@ -25,6 +25,7 @@ let dem, demShadow, ortho, lat0, lon0, zmin;
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
 let parcelGroup = null, pointMarker = null, sunArcGroup = null;
 let onSunCb = null, started = false, farHorizon = null, farGridMat = null;
+let farMeshGeom = null, farDemRef = null;
 
 function smoothstep(e0, e1, x) {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -90,6 +91,7 @@ function disposeScene() {
     scene = null;
   }
   parcelGroup = pointMarker = sunArcGroup = farGridMat = null;
+  farMeshGeom = farDemRef = null;
   sunLight = ambient = null;
 }
 
@@ -311,13 +313,19 @@ function buildScene(buildings, parcels, farDem) {
     }
     const sgeom = new THREE.BufferGeometry();
     sgeom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    // couleur par sommet : porte l'ombre du relief lointain (cf. updateSun)
+    sgeom.setAttribute("color",
+      new THREE.BufferAttribute(new Float32Array(nx * nz * 3).fill(1), 3));
     sgeom.setIndex(tri);
     sgeom.computeVertexNormals();
     const farMesh = new THREE.Mesh(sgeom, new THREE.MeshLambertMaterial({
-      color: 0x6b745a, polygonOffset: true,        // recule la surface ->
-      polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));  // quadrillage net
+      color: 0x6b745a, vertexColors: true, polygonOffset: true,
+      polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));   // quadrillage net
     farMesh.position.y = -2;
     scene.add(farMesh);
+    farMeshGeom = sgeom;          // pour l'ombre portee recalculee a chaque
+    farDemRef = farDem;           // mouvement du soleil
+
     // quadrillage par-dessus : lignes qui epousent le relief
     const seg = [];
     const put = k => seg.push(pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]);
@@ -476,6 +484,26 @@ export function updateSun() {
   if (farGridMat) {                             // quadrillage du relief lointain
     const gb = 0.4 + 0.6 * dayBright;
     farGridMat.color.setRGB(0.85 * gb, 0.86 * gb, 0.78 * gb);
+  }
+
+  // --- relief lointain : ombre portee (cretes -> vallees) ---
+  // marche d'ombrage sur le MNT lointain, jusqu'a 20 km, avec un pas plus
+  // regulier (growth eleve) ; le resultat teinte les sommets de la surface.
+  if (farMeshGeom && farDemRef) {
+    const mLon = M_PER_DEG_LAT * Math.cos(lat0 * Math.PI / 180);
+    const shf = castShadow(farDemRef, sun.az, Math.max(0.01, el), 20000, 1500);
+    const shDem = { ...farDemRef, z: shf };
+    const fp = farMeshGeom.attributes.position;
+    const fcol = farMeshGeom.attributes.color;
+    for (let v = 0; v < fp.count; v++) {
+      const s = sampleDem(shDem,
+        lat0 - fp.getZ(v) / M_PER_DEG_LAT, lon0 + fp.getX(v) / mLon);
+      const L = Number.isFinite(s)
+        ? Math.min(1, Math.max(0, (s - 0.32) / 0.68)) : 1;
+      const c = 0.4 + 0.6 * L;                  // 0.4 a l'ombre, 1 au soleil
+      fcol.setXYZ(v, c, c, c);
+    }
+    fcol.needsUpdate = true;
   }
 
   // ciel : bleu le jour -> chaud bas -> sombre la nuit

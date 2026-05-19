@@ -263,7 +263,10 @@ function sampleGridPx(z, w, h, row, col) {
 
 // Carte d'ombrage (Float32Array, 1 = soleil, SHADOW_KEEP = a l'ombre).
 // dem : objet de makeDem. Pixels carres en metres.
-export function castShadow(dem, sunAz, sunEl, maxDist) {
+// growth : controle la croissance du pas de marche. Petit (220) = pas
+// fin pres de l'observateur (zone detaillee) ; grand = pas plus regulier,
+// adapte a une marche longue sur un relief lointain grossier.
+export function castShadow(dem, sunAz, sunEl, maxDist, growth = 220) {
   const { z, w, h } = dem;
   const resM = (dem.latN - dem.latS) * M_PER_DEG_LAT / h;
   const out = new Float32Array(w * h);
@@ -283,7 +286,7 @@ export function castShadow(dem, sunAz, sunEl, maxDist) {
         }
       }
     }
-    d += resM * (1.0 + d / 220.0);
+    d += resM * (1.0 + d / growth);
   }
   for (let i = 0; i < w * h; i++) {
     out[i] = z[i] >= blocker[i] ? 1.0 : SHADOW_KEEP;
