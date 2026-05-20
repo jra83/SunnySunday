@@ -214,12 +214,16 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
   terrain.castShadow = true;
   scene.add(terrain);
 
-  // --- batiments : murs verticaux BD TOPO (extrusion precise jusqu'a la
-  // hauteur d'egout) + toit reconstruit depuis le MNS LiDAR (forme reelle)
+  // --- batiments : UN volume par batiment. Extrusion BD TOPO (murs
+  // precis verticaux), puis on EVIDE le dessus en deplacant les sommets
+  // du toit aux hauteurs MNS locales -> meme maille, toit reel.
   const latC = (dem.latN + dem.latS) / 2;
   const lonC = (dem.lonW + dem.lonE) / 2;
   const mLon = M_PER_DEG_LAT * Math.cos(latC * Math.PI / 180);
-  const bldMat = new THREE.MeshLambertMaterial({ map: bldTex });
+  // flatShading : les normales sont recalculees par face en GPU -> le toit
+  // deforme s'eclaire correctement, les murs gardent leur arete franche.
+  const bldMat = new THREE.MeshLambertMaterial({ map: bldTex,
+    flatShading: true });
   const { lonW: bLonW, latN: bLatN, dlon: bDlon, dlat: bDlat } = dem;
   for (const b of buildings) {
     let sx = 0, sy = 0;
@@ -227,7 +231,7 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
     const zBase = sampleDem(dem, sy / b.ring.length, sx / b.ring.length);
     if (!Number.isFinite(zBase)) continue;
 
-    // cellules MNS dont le centre tombe dans l'emprise -> sommets du toit
+    // MNS max sur l'emprise -> hauteur d'extrusion initiale (faîtage)
     let minC = w, maxC = -1, minR = h, maxR = -1;
     for (const [lon, lat] of b.ring) {
       const cc = (lon - bLonW) / bDlon, rr = (bLatN - lat) / bDlat;
@@ -238,83 +242,80 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
     const c1 = Math.min(w - 1, Math.ceil(maxC));
     const r0 = Math.max(0, Math.floor(minR));
     const r1 = Math.min(h - 1, Math.ceil(maxR));
-    const cells = [], cellAbs = [];
+    let maxAbs = -Infinity, cellsN = 0;
     for (let r = r0; r <= r1; r++) {
       for (let c = c0; c <= c1; c++) {
         const lon = bLonW + (c + 0.5) * bDlon, lat = bLatN - (r + 0.5) * bDlat;
         if (!pointInRing(lon, lat, b.ring)) continue;
         const s = mns.z[r * w + c], gg = dem.z[r * w + c];
         if (Number.isFinite(s) && Number.isFinite(gg) && s > gg) {
-          cells.push({ r, c, abs: s });
-          cellAbs.push(s);
+          if (s > maxAbs) maxAbs = s;
+          cellsN++;
         }
       }
     }
-    if (cells.length < 3) continue;          // sans MNS exploitable
+    if (cellsN < 3) continue;          // sans MNS exploitable
+    const depth = Math.max(2.5, maxAbs - zBase) + 1;
 
-    // hauteur d'egout = 15e percentile du MNS sur l'emprise
-    cellAbs.sort((p, q) => p - q);
-    const eaveAbs = cellAbs[Math.floor(cellAbs.length * 0.15)];
-    const eaveAboveGround = Math.max(2.5, eaveAbs - zBase);
+    // emprise densifiee (point tous les 2 m sur les aretes) : davantage
+    // de sommets au sommet de l'extrusion -> mieux suit la forme MNS.
+    const ring2d = [];
+    for (let k = 0; k < b.ring.length; k++) {
+      const [lo, la] = b.ring[k];
+      const x = (lo - lonC) * mLon, y = (la - latC) * M_PER_DEG_LAT;
+      ring2d.push([x, y]);
+      if (k < b.ring.length - 1) {
+        const [lo2, la2] = b.ring[k + 1];
+        const x2 = (lo2 - lonC) * mLon, y2 = (la2 - latC) * M_PER_DEG_LAT;
+        const len = Math.hypot(x2 - x, y2 - y);
+        const n = Math.floor(len / 2);
+        for (let s = 1; s < n; s++) {
+          const t = s / n;
+          ring2d.push([x + (x2 - x) * t, y + (y2 - y) * t]);
+        }
+      }
+    }
+    if (ring2d.length > 1 && ring2d[0][0] === ring2d[ring2d.length - 1][0]
+        && ring2d[0][1] === ring2d[ring2d.length - 1][1]) ring2d.pop();
 
-    // murs : extrusion BD TOPO jusqu'a la hauteur d'egout (+1 pour
-    // s'enfoncer dans le sol et eviter le z-fight au pied)
     const shape = new THREE.Shape();
-    b.ring.forEach(([lo, la], i) => {
-      const ex = (lo - lonC) * mLon, ny = (la - latC) * M_PER_DEG_LAT;
+    ring2d.forEach(([ex, ny], i) => {
       i ? shape.lineTo(ex, ny) : shape.moveTo(ex, ny);
     });
+
     const g = new THREE.ExtrudeGeometry(shape,
-      { depth: eaveAboveGround + 1, bevelEnabled: false });
+      { depth, bevelEnabled: false });
     g.rotateX(-Math.PI / 2);
     const pa = g.attributes.position;
+    // EVIDE le dessus : pour chaque sommet du toit (y == depth apres
+    // rotation), on remplace y par la hauteur MNS locale.
+    const topY = depth - 0.05;
+    for (let i = 0; i < pa.count; i++) {
+      if (pa.getY(i) > topY) {
+        const sX = pa.getX(i), sZ = pa.getZ(i);
+        const lon = lonC + sX / mLon;
+        const lat = latC - sZ / M_PER_DEG_LAT;
+        const m = sampleDem(mns, lat, lon);
+        if (Number.isFinite(m)) {
+          pa.setY(i, m - zBase + 1);
+        }
+      }
+    }
+    pa.needsUpdate = true;
+
+    // UV planaire (x, z scene) -> independant de la deformation verticale
     const ub = new Float32Array(pa.count * 2);
     for (let i = 0; i < pa.count; i++) {
       ub[2 * i] = (pa.getX(i) + W / 2) / W;
       ub[2 * i + 1] = 1 - (pa.getZ(i) + H / 2) / H;
     }
     g.setAttribute("uv", new THREE.BufferAttribute(ub, 2));
+
     const mesh = new THREE.Mesh(g, bldMat);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.position.y = (zBase - zmin) - 1.0;
     scene.add(mesh);
-
-    // toit : maillage MNS sur les cellules de l'emprise (forme reelle)
-    const vertOf = new Map();
-    const rpos = [], ruv = [];
-    for (const cell of cells) {
-      vertOf.set(cell.r * w + cell.c, rpos.length / 3);
-      rpos.push(cell.c * resM - W / 2,
-                cell.abs - zmin + 0.2,         // +20 cm : evite z-fight
-                cell.r * resM - H / 2);
-      ruv.push(cell.c / (w - 1), 1 - cell.r / (h - 1));
-    }
-    const ridx = [];
-    for (const cell of cells) {
-      const cr = cell.r, cc = cell.c;
-      const a = vertOf.get(cr * w + cc);
-      const b2 = vertOf.get(cr * w + cc + 1);
-      const d2 = vertOf.get((cr + 1) * w + cc);
-      const e2 = vertOf.get((cr + 1) * w + cc + 1);
-      if (a !== undefined && b2 !== undefined
-          && d2 !== undefined && e2 !== undefined) {
-        ridx.push(a, d2, b2, b2, d2, e2);
-      }
-    }
-    if (ridx.length) {
-      const rgeom = new THREE.BufferGeometry();
-      rgeom.setAttribute("position",
-        new THREE.BufferAttribute(new Float32Array(rpos), 3));
-      rgeom.setAttribute("uv",
-        new THREE.BufferAttribute(new Float32Array(ruv), 2));
-      rgeom.setIndex(ridx);
-      rgeom.computeVertexNormals();
-      const roofMesh = new THREE.Mesh(rgeom, bldMat);
-      roofMesh.castShadow = true;
-      roofMesh.receiveShadow = true;
-      scene.add(roofMesh);
-    }
   }
 
   // --- vegetation : canopee LiDAR a l'altitude reelle, texturee a
