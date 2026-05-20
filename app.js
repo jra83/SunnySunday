@@ -139,7 +139,7 @@ document.getElementById("btnCalc").addEventListener("click", async () => {
     lastMask = { terrain: horizon, total, veg,
       lat: point.lat, lon: point.lon };
     drawMask(horizon, total, veg, point.lat, point.lon, cur3dSun);
-    showHours(point.lat, point.lon, total, zGround);
+    showHours(point.lat, point.lon, total, veg, zGround);
     reveal("panelMask");
 
     // --- vue 3D --- (panneau revele AVANT : sinon le canvas a une taille
@@ -267,7 +267,7 @@ function drawMask(terr, total, veg, lat, lon, curSun) {
 }
 
 // --------------------------------------------------------- cartes "heures"
-function showHours(lat, lon, horizon, zGround) {
+function showHours(lat, lon, horizon, vegHorizon, zGround) {
   const box = document.getElementById("hours");
   box.innerHTML = "";
   const mk = (t, v) => {
@@ -279,7 +279,9 @@ function showHours(lat, lon, horizon, zGround) {
   mk("Altitude du sol", `${zGround.toFixed(1)} m`);
   for (const d of DATES) {
     const r = sunHours(lat, lon, YEAR, d.m, d.d, horizon);
-    mk(d.name, `${r.visible.toFixed(2)} h <small>/ ${r.total.toFixed(2)} h</small>`);
+    const rv = sunHours(lat, lon, YEAR, d.m, d.d, vegHorizon);
+    mk(d.name, `${r.visible.toFixed(1)} h `
+      + `<small>(${rv.visible.toFixed(1)} h) / ${r.total.toFixed(1)} h</small>`);
   }
 }
 
