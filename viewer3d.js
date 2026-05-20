@@ -10,7 +10,7 @@ import {
   LAYER_MNS_LIDAR, LAYER_MNS_RGE,
 } from "./ign.js";
 import {
-  smoothDem, sampleDem, castShadow, castShadowCanopy, burnBuildings,
+  smoothDem, sampleDem, castShadow, castShadowCanopy,
   solarPosition, utcOffset, M_PER_DEG_LAT, sunTrack, horizonAt, pointInRing,
   buildingMask, demCovered,
 } from "./compute.js";
@@ -25,7 +25,7 @@ const SHADOW_MAX = 700;
 const SUN_BASE = 1.5, AMB_BASE = 0.5;     // eclairage GPU des batiments
 
 let renderer, scene, camera, controls, sunLight, ambient;
-let dem, demShadow, ortho, lat0, lon0, zmin;
+let dem, demShadow, mns, ortho, lat0, lon0, zmin;
 let vegAbs = null;                        // altitude absolue de la canopee
 let terrainCanvas, terrainCtx, terrainTex, orthoData;
 let bldCanvas, bldCtx, bldTex;            // texture batiments (ortho + ombre
@@ -39,32 +39,6 @@ function smoothstep(e0, e1, x) {
   return t * t * (3 - 2 * t);
 }
 
-// hauteur de toit d'un batiment estimee depuis le MNS (sursol au-dessus
-// du sol) : 60e percentile sur l'emprise -> robuste aux bords et antennes.
-function roofHeightFromMNS(mns, mnt, b) {
-  const { lonW, latN, dlon, dlat, w, h } = mns;
-  let minC = w, maxC = -1, minR = h, maxR = -1;
-  for (const [lon, lat] of b.ring) {
-    const c = (lon - lonW) / dlon, r = (latN - lat) / dlat;
-    if (c < minC) minC = c; if (c > maxC) maxC = c;
-    if (r < minR) minR = r; if (r > maxR) maxR = r;
-  }
-  const c0 = Math.max(0, Math.floor(minC)), c1 = Math.min(w - 1, Math.ceil(maxC));
-  const r0 = Math.max(0, Math.floor(minR)), r1 = Math.min(h - 1, Math.ceil(maxR));
-  const hs = [];
-  for (let r = r0; r <= r1; r++) {
-    for (let c = c0; c <= c1; c++) {
-      const lon = lonW + (c + 0.5) * dlon, lat = latN - (r + 0.5) * dlat;
-      if (!pointInRing(lon, lat, b.ring)) continue;
-      const s = mns.z[r * w + c], g = mnt.z[r * w + c];
-      if (Number.isFinite(s) && Number.isFinite(g)) hs.push(s - g);
-    }
-  }
-  if (hs.length < 3) return null;
-  hs.sort((p, q) => p - q);
-  return Math.min(120, Math.max(2.5, hs[Math.floor(hs.length * 0.6)]));
-}
-
 export async function start3d(lat, lon, statusCb, onSun, farHor) {
   lat0 = lat; lon0 = lon; onSunCb = onSun; farHorizon = farHor || null;
   statusCb("Téléchargement du relief précis du terrain (pentes, vallons)...");
@@ -76,15 +50,11 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
   statusCb("Téléchargement des limites de parcelles...");
   const parcels = await fetchParcels(lat, lon, ZONE_R + 40);
   statusCb("Téléchargement du relief de surface LiDAR HD (toits)...");
-  let mns = await fetchDem(lat, lon, ZONE_R, ZONE_RES, LAYER_MNS_LIDAR);
+  mns = await fetchDem(lat, lon, ZONE_R, ZONE_RES, LAYER_MNS_LIDAR);
   if (!demCovered(mns, dem)) {                  // pas de couverture LiDAR HD
     mns = await fetchDem(lat, lon, ZONE_R, ZONE_RES, LAYER_MNS_RGE);
   }
   mns = smoothDem(mns, 1);
-  for (const b of buildings) {                  // toits a la hauteur reelle
-    const hgt = roofHeightFromMNS(mns, dem, b);
-    if (hgt != null) b.height = hgt;
-  }
   statusCb("Téléchargement du relief alentour...");
   let nearCtxDem = null, farDem = null;
   try {
@@ -95,17 +65,26 @@ export async function start3d(lat, lon, statusCb, onSun, farHor) {
     farDem = smoothDem(await fetchDem(lat, lon, FAR3D_R, FAR3D_RES), 1);
   } catch (e) { /* relief lointain optionnel : on continue sans */ }
   statusCb("Construction de la maquette 3D...");
-  demShadow = { ...dem, z: burnBuildings(dem, buildings) };
-  // vegetation : sursol (MNS - sol) entre 2,5 et 45 m, hors emprises de
-  // batiments. vegAbs = altitude absolue du sommet de la canopee.
+  // demShadow : on grave les VRAIES hauteurs MNS dans les emprises de
+  // batiments (vraie forme du toit), pas une extrusion plate uniforme.
+  // -> l'ombre portee suit la forme reelle des toits.
+  const bmask = buildingMask(dem, buildings);
   {
-    const bmask = buildingMask(dem, buildings);
-    vegAbs = new Float32Array(dem.z.length);
-    for (let i = 0; i < vegAbs.length; i++) {
-      const s = mns.z[i], g = dem.z[i];
-      if (!bmask[i] && Number.isFinite(s) && Number.isFinite(g)
-          && s - g > 2.5 && s - g < 45) vegAbs[i] = s;
+    const zS = Float32Array.from(dem.z);
+    for (let i = 0; i < zS.length; i++) {
+      if (bmask[i]) {
+        const s = mns.z[i];
+        if (Number.isFinite(s) && s > zS[i]) zS[i] = s;
+      }
     }
+    demShadow = { ...dem, z: zS };
+  }
+  // vegetation : sursol > 2,5 m hors emprises de batiments
+  vegAbs = new Float32Array(dem.z.length);
+  for (let i = 0; i < vegAbs.length; i++) {
+    const s = mns.z[i], g = dem.z[i];
+    if (!bmask[i] && Number.isFinite(s) && Number.isFinite(g)
+        && s - g > 2.5 && s - g < 45) vegAbs[i] = s;
   }
   buildScene(buildings, parcels, nearCtxDem, farDem);
   updateSun();
@@ -235,23 +214,58 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
   terrain.castShadow = true;
   scene.add(terrain);
 
-  // --- batiments : extrudes, textures, ombrage GPU (murs ombres) ---
+  // --- batiments : murs verticaux BD TOPO (extrusion precise jusqu'a la
+  // hauteur d'egout) + toit reconstruit depuis le MNS LiDAR (forme reelle)
   const latC = (dem.latN + dem.latS) / 2;
   const lonC = (dem.lonW + dem.lonE) / 2;
   const mLon = M_PER_DEG_LAT * Math.cos(latC * Math.PI / 180);
   const bldMat = new THREE.MeshLambertMaterial({ map: bldTex });
+  const { lonW: bLonW, latN: bLatN, dlon: bDlon, dlat: bDlat } = dem;
   for (const b of buildings) {
     let sx = 0, sy = 0;
     for (const [lo, la] of b.ring) { sx += lo; sy += la; }
     const zBase = sampleDem(dem, sy / b.ring.length, sx / b.ring.length);
     if (!Number.isFinite(zBase)) continue;
+
+    // cellules MNS dont le centre tombe dans l'emprise -> sommets du toit
+    let minC = w, maxC = -1, minR = h, maxR = -1;
+    for (const [lon, lat] of b.ring) {
+      const cc = (lon - bLonW) / bDlon, rr = (bLatN - lat) / bDlat;
+      if (cc < minC) minC = cc; if (cc > maxC) maxC = cc;
+      if (rr < minR) minR = rr; if (rr > maxR) maxR = rr;
+    }
+    const c0 = Math.max(0, Math.floor(minC));
+    const c1 = Math.min(w - 1, Math.ceil(maxC));
+    const r0 = Math.max(0, Math.floor(minR));
+    const r1 = Math.min(h - 1, Math.ceil(maxR));
+    const cells = [], cellAbs = [];
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const lon = bLonW + (c + 0.5) * bDlon, lat = bLatN - (r + 0.5) * bDlat;
+        if (!pointInRing(lon, lat, b.ring)) continue;
+        const s = mns.z[r * w + c], gg = dem.z[r * w + c];
+        if (Number.isFinite(s) && Number.isFinite(gg) && s > gg) {
+          cells.push({ r, c, abs: s });
+          cellAbs.push(s);
+        }
+      }
+    }
+    if (cells.length < 3) continue;          // sans MNS exploitable
+
+    // hauteur d'egout = 15e percentile du MNS sur l'emprise
+    cellAbs.sort((p, q) => p - q);
+    const eaveAbs = cellAbs[Math.floor(cellAbs.length * 0.15)];
+    const eaveAboveGround = Math.max(2.5, eaveAbs - zBase);
+
+    // murs : extrusion BD TOPO jusqu'a la hauteur d'egout (+1 pour
+    // s'enfoncer dans le sol et eviter le z-fight au pied)
     const shape = new THREE.Shape();
     b.ring.forEach(([lo, la], i) => {
       const ex = (lo - lonC) * mLon, ny = (la - latC) * M_PER_DEG_LAT;
       i ? shape.lineTo(ex, ny) : shape.moveTo(ex, ny);
     });
     const g = new THREE.ExtrudeGeometry(shape,
-      { depth: b.height, bevelEnabled: false });
+      { depth: eaveAboveGround + 1, bevelEnabled: false });
     g.rotateX(-Math.PI / 2);
     const pa = g.attributes.position;
     const ub = new Float32Array(pa.count * 2);
@@ -265,6 +279,42 @@ function buildScene(buildings, parcels, nearCtxDem, farDem) {
     mesh.receiveShadow = true;
     mesh.position.y = (zBase - zmin) - 1.0;
     scene.add(mesh);
+
+    // toit : maillage MNS sur les cellules de l'emprise (forme reelle)
+    const vertOf = new Map();
+    const rpos = [], ruv = [];
+    for (const cell of cells) {
+      vertOf.set(cell.r * w + cell.c, rpos.length / 3);
+      rpos.push(cell.c * resM - W / 2,
+                cell.abs - zmin + 0.2,         // +20 cm : evite z-fight
+                cell.r * resM - H / 2);
+      ruv.push(cell.c / (w - 1), 1 - cell.r / (h - 1));
+    }
+    const ridx = [];
+    for (const cell of cells) {
+      const cr = cell.r, cc = cell.c;
+      const a = vertOf.get(cr * w + cc);
+      const b2 = vertOf.get(cr * w + cc + 1);
+      const d2 = vertOf.get((cr + 1) * w + cc);
+      const e2 = vertOf.get((cr + 1) * w + cc + 1);
+      if (a !== undefined && b2 !== undefined
+          && d2 !== undefined && e2 !== undefined) {
+        ridx.push(a, d2, b2, b2, d2, e2);
+      }
+    }
+    if (ridx.length) {
+      const rgeom = new THREE.BufferGeometry();
+      rgeom.setAttribute("position",
+        new THREE.BufferAttribute(new Float32Array(rpos), 3));
+      rgeom.setAttribute("uv",
+        new THREE.BufferAttribute(new Float32Array(ruv), 2));
+      rgeom.setIndex(ridx);
+      rgeom.computeVertexNormals();
+      const roofMesh = new THREE.Mesh(rgeom, bldMat);
+      roofMesh.castShadow = true;
+      roofMesh.receiveShadow = true;
+      scene.add(roofMesh);
+    }
   }
 
   // --- vegetation : canopee LiDAR a l'altitude reelle, texturee a
