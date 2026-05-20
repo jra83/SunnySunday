@@ -170,6 +170,20 @@ function onSunMoved(az, el) {
 document.getElementById("s_hour").addEventListener("input", updateSun);
 document.getElementById("s_day").addEventListener("input", updateSun);
 
+// boutons - / + pour avancer pas a pas (un click = un step du slider)
+document.querySelectorAll(".step").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const inp = document.getElementById(btn.dataset.tgt);
+    const step = parseFloat(inp.step) || 1;
+    const min = parseFloat(inp.min), max = parseFloat(inp.max);
+    const dir = parseInt(btn.dataset.dir, 10);
+    let v = parseFloat(inp.value) + dir * step;
+    v = Math.round(v / step) * step;          // re-aligne sur le pas
+    inp.value = Math.max(min, Math.min(max, v));
+    inp.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+});
+
 // --------------------------------------------------------- dessin du masque
 function drawMask(terr, total, veg, lat, lon, curSun) {
   const cv = document.getElementById("mask");

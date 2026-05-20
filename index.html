@@ -61,6 +61,8 @@
   .sliders label { display:flex; align-items:center; gap:10px;
                    font-size:13px; color:var(--muted); margin:6px 0; }
   .sliders input[type=range] { flex:1; accent-color:var(--accent); }
+  .step { padding:2px 9px; font-size:17px; font-weight:700;
+          border-radius:6px; min-width:26px; line-height:1; }
   #sun3d { font-size:13px; color:var(--muted); margin-top:4px; }
 </style>
 </head>
@@ -93,10 +95,17 @@
     <h3>Vue 3D — le point jaune « 3D » est reporté sur le masque</h3>
     <div id="three"></div>
     <div class="sliders">
-      <label>Heure <input type="range" id="s_hour" min="4" max="22"
-             step="0.0833333" value="13"><span id="v_hour">13h00</span></label>
-      <label>Jour&nbsp; <input type="range" id="s_day" min="1" max="365"
-             step="1" value="172"><span id="v_day">21/06</span></label>
+      <label>Heure
+        <button type="button" class="step" data-tgt="s_hour" data-dir="-1">−</button>
+        <input type="range" id="s_hour" min="4" max="22"
+               step="0.01666666666666667" value="13">
+        <button type="button" class="step" data-tgt="s_hour" data-dir="1">+</button>
+        <span id="v_hour">13h00</span></label>
+      <label>Jour&nbsp;
+        <button type="button" class="step" data-tgt="s_day" data-dir="-1">−</button>
+        <input type="range" id="s_day" min="1" max="365" step="1" value="172">
+        <button type="button" class="step" data-tgt="s_day" data-dir="1">+</button>
+        <span id="v_day">21/06</span></label>
       <label><input type="checkbox" id="chkParcels"> Limites de parcelles
              cadastrales</label>
       <label><input type="checkbox" id="chkPoint" checked> Point sélectionné
