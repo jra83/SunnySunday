@@ -599,11 +599,12 @@ export function updateSun() {
   const el = sun.el;
   // le soleil est-il masque par un relief lointain (au-dela de la zone
   // detaillee de 220 m, jusqu'a 25 km) ? blockFactor : 1 = masque,
-  // 0 = degage, avec une transition douce de ~2 deg (soit ~8 min de
-  // course solaire, plus realiste : le soleil a un diametre apparent
-  // de ~0,5 deg et la crete n'est pas parfaitement nette).
+  // 0 = degage. La largeur de transition = diametre apparent reel du
+  // soleil (~0,5 deg). Le TEMPS de la transition n'est PAS fixe : il
+  // depend de la vitesse a laquelle le soleil traverse ces 0,5 deg
+  // (rapide quand d(el)/dt est grand, lent pres du zenith).
   const reliefBlock = farHorizon ? horizonAt(sun.az, farHorizon) : -90;
-  const blockFactor = smoothstep(-1, 1, reliefBlock - el);
+  const blockFactor = smoothstep(-0.25, 0.25, reliefBlock - el);
   // luminosite du sol selon l'heure : 1 a midi, plancher 0.34 (la demarcation
   // d'ombre reste donc visible meme la nuit)
   const dayBright = 0.34 + 0.66 * smoothstep(-4, 8, el);
